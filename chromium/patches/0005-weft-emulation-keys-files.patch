@@ -1,0 +1,534 @@
+diff --git a/chrome/browser/ui/webui/weft/BUILD.gn b/chrome/browser/ui/webui/weft/BUILD.gn
+index b96a56469e..4334b52080 100644
+--- a/chrome/browser/ui/webui/weft/BUILD.gn
++++ b/chrome/browser/ui/webui/weft/BUILD.gn
+@@ -15,6 +15,7 @@ source_set("weft") {
+     "//chrome/browser/profiles:profile_manager",
+     "//components/content_settings/core/browser:cookie_settings",
+     "//components/content_settings/core/common",
++    "//components/input",
+     "//components/language/core/browser",
+     "//components/prefs",
+     "//components/proxy_config",
+@@ -29,6 +30,7 @@ source_set("weft") {
+     "//third_party/blink/public/common",
+     "//third_party/blink/public/mojom:mojom_platform",
+     "//ui/base",
++    "//ui/events:dom_keycode_converter",
+     "//ui/gfx/geometry",
+     "//ui/webui",
+     "//url",
+diff --git a/chrome/browser/ui/webui/weft/weft_ui.cc b/chrome/browser/ui/webui/weft/weft_ui.cc
+index 1b56c4f619..e8b735e85b 100644
+--- a/chrome/browser/ui/webui/weft/weft_ui.cc
++++ b/chrome/browser/ui/webui/weft/weft_ui.cc
+@@ -9,13 +9,19 @@
+ #include <utility>
+ #include <vector>
+ 
++#include "base/containers/span.h"
++#include "base/files/file_enumerator.h"
+ #include "base/files/file_path.h"
++#include "base/files/file_util.h"
++#include "base/files/important_file_writer.h"
+ #include "base/functional/bind.h"
+ #include "base/functional/callback_helpers.h"
++#include "base/json/json_writer.h"
+ #include "base/logging.h"
+ #include "base/memory/raw_ptr.h"
+ #include "base/memory/weak_ptr.h"
+ #include "base/strings/utf_string_conversions.h"
++#include "base/task/thread_pool.h"
+ #include "base/values.h"
+ #include "chrome/browser/browser_process.h"
+ #include "chrome/browser/profiles/profile.h"
+@@ -31,8 +37,12 @@
+ #include "components/proxy_config/proxy_config_dictionary.h"
+ #include "components/proxy_config/proxy_config_pref_names.h"
+ #include "components/surface_embed/browser/surface_embed_handle.h"
++#include "components/input/native_web_keyboard_event.h"
+ #include "components/version_info/version_info.h"
++#include "content/public/browser/devtools_agent_host.h"
++#include "content/public/browser/devtools_agent_host_client.h"
+ #include "content/public/browser/host_zoom_map.h"
++#include "content/public/browser/keyboard_event_processing_result.h"
+ #include "content/public/browser/navigation_controller.h"
+ #include "content/public/browser/navigation_entry.h"
+ #include "content/public/browser/navigation_handle.h"
+@@ -46,9 +56,14 @@
+ #include "content/public/browser/web_ui_message_handler.h"
+ #include "content/public/common/url_constants.h"
+ #include "services/network/public/mojom/content_security_policy.mojom.h"
++#include "third_party/blink/public/common/input/web_input_event.h"
++#include "third_party/blink/public/common/input/web_keyboard_event.h"
+ #include "third_party/blink/public/common/page/page_zoom.h"
+ #include "third_party/blink/public/mojom/favicon/favicon_url.mojom.h"
+ #include "ui/base/window_open_disposition.h"
++#include "ui/events/keycodes/dom/dom_code.h"
++#include "ui/events/keycodes/dom/dom_key.h"
++#include "ui/events/keycodes/dom/keycode_converter.h"
+ #include "ui/gfx/geometry/rect.h"
+ #include "ui/gfx/geometry/size.h"
+ #include "ui/webui/webui_util.h"
+@@ -56,6 +71,49 @@
+ 
+ namespace weft {
+ 
++namespace {
++
++// Weft's files: a relative name of plain path components under DataDir().
++std::optional<base::FilePath> DataPath(const std::string& name) {
++  if (name.empty() || name.front() == '/') {
++    return std::nullopt;
++  }
++  base::FilePath path = WeftUI::DataDir();
++  for (const base::FilePath::StringType& part :
++       base::FilePath(name).GetComponents()) {
++    if (part.empty() || part == "." || part == ".." ||
++        part.find('/') != std::string::npos) {
++      return std::nullopt;
++    }
++    path = path.Append(part);
++  }
++  return path;
++}
++
++std::optional<std::string> ReadFileTask(base::FilePath path) {
++  std::string text;
++  if (!base::ReadFileToString(path, &text)) {
++    return std::nullopt;
++  }
++  return text;
++}
++
++bool WriteFileTask(base::FilePath path, std::string text) {
++  return base::CreateDirectory(path.DirName()) &&
++         base::ImportantFileWriter::WriteFileAtomically(path, text);
++}
++
++std::vector<std::string> ListDirTask(base::FilePath path) {
++  std::vector<std::string> names;
++  base::FileEnumerator it(path, false, base::FileEnumerator::FILES);
++  for (base::FilePath f = it.Next(); !f.empty(); f = it.Next()) {
++    names.push_back(f.BaseName().value());
++  }
++  return names;
++}
++
++}  // namespace
++
+ // The browser half of the engine protocol (shell/engine.ts in the fork repo).
+ // Replies go through window.__weft.resolve(requestId, reply) and events
+ // through window.__weft.event(event).
+@@ -82,6 +140,21 @@ class WeftHandler : public content::WebUIMessageHandler {
+     web_ui()->RegisterMessageCallback(
+         "wipe", base::BindRepeating(&WeftHandler::Wipe,
+                                     base::Unretained(this)));
++    web_ui()->RegisterMessageCallback(
++        "setLeader", base::BindRepeating(&WeftHandler::SetLeader,
++                                         base::Unretained(this)));
++    web_ui()->RegisterMessageCallback(
++        "readFile", base::BindRepeating(&WeftHandler::ReadFile,
++                                        base::Unretained(this)));
++    web_ui()->RegisterMessageCallback(
++        "writeFile", base::BindRepeating(&WeftHandler::WriteFile,
++                                         base::Unretained(this)));
++    web_ui()->RegisterMessageCallback(
++        "removeFile", base::BindRepeating(&WeftHandler::RemoveFile,
++                                          base::Unretained(this)));
++    web_ui()->RegisterMessageCallback(
++        "listDir", base::BindRepeating(&WeftHandler::ListDir,
++                                       base::Unretained(this)));
+   }
+ 
+   void Emit(const base::DictValue& event) {
+@@ -95,14 +168,104 @@ class WeftHandler : public content::WebUIMessageHandler {
+     return args.size() > i ? args[i].GetIfString() : nullptr;
+   }
+ 
+-  // [requestId] -> {version}
++  // [requestId] -> {version, dataDir}
+   void GetBoot(const base::ListValue& args) {
+     AllowJavascript();
+     base::DictValue reply;
+     reply.Set("version", std::string(version_info::GetVersionNumber()));
++    reply.Set("dataDir", WeftUI::DataDir().value());
+     CallJavascriptFunction("__weft.resolve", args[0], reply);
+   }
+ 
++  // [on]
++  void SetLeader(const base::ListValue& args) {
++    AllowJavascript();
++    controller_->SetLeader(args.size() > 0 &&
++                           args[0].GetIfBool().value_or(false));
++  }
++
++  // [requestId, name] -> {text} | {text: null}
++  void ReadFile(const base::ListValue& args) {
++    AllowJavascript();
++    const std::string* name = Str(args, 1);
++    std::optional<base::FilePath> path = name ? DataPath(*name) : std::nullopt;
++    if (!path) {
++      Resolve(args[0].Clone(), std::nullopt);
++      return;
++    }
++    base::ThreadPool::PostTaskAndReplyWithResult(
++        FROM_HERE, {base::MayBlock(), base::TaskPriority::USER_VISIBLE},
++        base::BindOnce(&ReadFileTask, *path),
++        base::BindOnce(&WeftHandler::Resolve, weak_factory_.GetWeakPtr(),
++                       args[0].Clone()));
++  }
++
++  // [name, text]: written atomically, directories made as needed.
++  void WriteFile(const base::ListValue& args) {
++    AllowJavascript();
++    const std::string* name = Str(args, 0);
++    const std::string* text = Str(args, 1);
++    std::optional<base::FilePath> path = name ? DataPath(*name) : std::nullopt;
++    if (!path || !text) {
++      return;
++    }
++    base::ThreadPool::PostTaskAndReplyWithResult(
++        FROM_HERE, {base::MayBlock(), base::TaskPriority::USER_VISIBLE},
++        base::BindOnce(&WriteFileTask, *path, *text),
++        base::BindOnce([](bool ok) {
++          LOG_IF(ERROR, !ok) << "weft: a file could not be written";
++        }));
++  }
++
++  // [name]
++  void RemoveFile(const base::ListValue& args) {
++    AllowJavascript();
++    const std::string* name = Str(args, 0);
++    std::optional<base::FilePath> path = name ? DataPath(*name) : std::nullopt;
++    if (!path) {
++      return;
++    }
++    base::ThreadPool::PostTask(
++        FROM_HERE, {base::MayBlock()},
++        base::BindOnce(base::IgnoreResult(&base::DeleteFile), *path));
++  }
++
++  // [requestId, name] -> {names}
++  void ListDir(const base::ListValue& args) {
++    AllowJavascript();
++    const std::string* name = Str(args, 1);
++    std::optional<base::FilePath> path = name ? DataPath(*name) : std::nullopt;
++    if (!path) {
++      ResolveNames(args[0].Clone(), {});
++      return;
++    }
++    base::ThreadPool::PostTaskAndReplyWithResult(
++        FROM_HERE, {base::MayBlock(), base::TaskPriority::USER_VISIBLE},
++        base::BindOnce(&ListDirTask, *path),
++        base::BindOnce(&WeftHandler::ResolveNames, weak_factory_.GetWeakPtr(),
++                       args[0].Clone()));
++  }
++
++  void Resolve(base::Value request_id, std::optional<std::string> text) {
++    base::DictValue reply;
++    if (text) {
++      reply.Set("text", *text);
++    } else {
++      reply.Set("text", base::Value());
++    }
++    CallJavascriptFunction("__weft.resolve", request_id, reply);
++  }
++
++  void ResolveNames(base::Value request_id, std::vector<std::string> names) {
++    base::DictValue reply;
++    base::ListValue list;
++    for (const std::string& n : names) {
++      list.Append(n);
++    }
++    reply.Set("names", std::move(list));
++    CallJavascriptFunction("__weft.resolve", request_id, reply);
++  }
++
+   // [requestId, pageId, url, wsId, mode] -> {contentId} | {error}: a page
+   // loading `url` in the workspace's profile ("persist" | "disposable") or in
+   // a private off-the-record profile of it ("private"), ready for a
+@@ -121,12 +284,14 @@ class WeftHandler : public content::WebUIMessageHandler {
+         ws ? *ws : std::string(), m == "disposable",
+         base::BindOnce(&WeftHandler::FinishCreatePage,
+                        weak_factory_.GetWeakPtr(), args[0].Clone(), *id,
+-                       url ? *url : std::string(), m == "private"));
++                       url ? *url : std::string(), ws ? *ws : std::string(),
++                       m == "private"));
+   }
+ 
+   void FinishCreatePage(base::Value request_id,
+                         const std::string& id,
+                         const std::string& url,
++                        const std::string& ws_id,
+                         bool is_private,
+                         Profile* profile) {
+     base::DictValue reply;
+@@ -144,7 +309,7 @@ class WeftHandler : public content::WebUIMessageHandler {
+       private_owner = profile;
+     }
+     content::WebContents* page =
+-        controller_->CreatePage(id, context, private_owner);
++        controller_->CreatePage(id, ws_id, context, private_owner);
+     if (!url.empty()) {
+       page->GetController().LoadURLWithParams(
+           content::NavigationController::LoadURLParams(GURL(url)));
+@@ -234,23 +399,59 @@ class WeftHandler : public content::WebUIMessageHandler {
+ namespace {
+ 
+ // Watches one page for the shell: navigation state, title, favicon, loading,
+-// crashes; and stands in as its delegate for what a page asks of its browser
+-// (links that want a new tab, the hovered URL). The decisions are the
+-// shell's: this only reports.
++// crashes, keys; stands in as its delegate for what a page asks of its
++// browser (links that want a new tab, the hovered URL); and holds a DevTools
++// session on it for timezone and locale emulation, as browser.ts does over
++// Electron's wc.debugger. The decisions are the shell's: this only reports.
+ class PageObserver : public content::WebContentsObserver,
+-                     public content::WebContentsDelegate {
++                     public content::WebContentsDelegate,
++                     public content::DevToolsAgentHostClient {
+  public:
+   PageObserver(WeftUI* ui, const std::string& id, content::WebContents* page)
+       : content::WebContentsObserver(page), ui_(ui), id_(id) {
+     page->SetDelegate(this);
++    agent_ = content::DevToolsAgentHost::GetOrCreateFor(page);
++    agent_->AttachClient(this);
+   }
+   ~PageObserver() override {
++    if (agent_) {
++      agent_->DetachClient(this);
++    }
+     if (web_contents()) {
+       web_contents()->SetDelegate(nullptr);
+     }
+   }
+ 
++  // Emulation.setTimezoneOverride / setLocaleOverride; an empty value clears.
++  void Emulate(const std::string& tz, const std::string& locale) {
++    Send("Emulation.setTimezoneOverride",
++         base::DictValue().Set("timezoneId", tz));
++    Send("Emulation.setLocaleOverride", base::DictValue().Set("locale", locale));
++  }
++
+  private:
++  void Send(const char* method, base::DictValue params) {
++    if (!agent_) {
++      return;
++    }
++    base::DictValue message;
++    message.Set("id", ++devtools_seq_);
++    message.Set("method", method);
++    message.Set("params", std::move(params));
++    std::optional<std::string> json = base::WriteJson(message);
++    if (json) {
++      agent_->DispatchProtocolMessage(this, base::as_byte_span(*json));
++    }
++  }
++
++  // content::DevToolsAgentHostClient:
++  void DispatchProtocolMessage(content::DevToolsAgentHost* agent_host,
++                               base::span<const uint8_t> message) override {}
++  void AgentHostClosed(content::DevToolsAgentHost* agent_host) override {
++    agent_ = nullptr;
++  }
++  bool IsTrusted() override { return true; }
++
+   base::DictValue Event(const char* type) {
+     base::DictValue e;
+     e.Set("type", type);
+@@ -348,6 +549,30 @@ class PageObserver : public content::WebContentsObserver,
+     e.Set("url", url.spec());
+     ui_->Emit(std::move(e));
+   }
++  // A key typed into a focused page arrives here from the shell's view, which
++  // retargets OS key events to the focused inner frame's widget. (Keys
++  // injected over DevTools go to the shell's widget and never pass here.)
++  content::KeyboardEventProcessingResult PreHandleKeyboardEvent(
++      content::WebContents* source,
++      const input::NativeWebKeyboardEvent& event) override {
++    if (event.GetType() != blink::WebInputEvent::Type::kRawKeyDown &&
++        event.GetType() != blink::WebInputEvent::Type::kKeyDown) {
++      return content::KeyboardEventProcessingResult::NOT_HANDLED;
++    }
++    const int mods = event.GetModifiers();
++    const bool consumed = ui_->OnPageKey(
++        id_,
++        ui::KeycodeConverter::DomKeyToKeyString(
++            static_cast<ui::DomKey>(event.dom_key)),
++        ui::KeycodeConverter::DomCodeToCodeString(
++            static_cast<ui::DomCode>(event.dom_code)),
++        mods & blink::WebInputEvent::kControlKey,
++        mods & blink::WebInputEvent::kMetaKey,
++        mods & blink::WebInputEvent::kAltKey,
++        source->IsFocusedElementEditable());
++    return consumed ? content::KeyboardEventProcessingResult::HANDLED
++                    : content::KeyboardEventProcessingResult::NOT_HANDLED;
++  }
+ 
+   void OpenLink(const GURL& url, WindowOpenDisposition disposition) {
+     if (!url.SchemeIsHTTPOrHTTPS()) {
+@@ -365,11 +590,14 @@ class PageObserver : public content::WebContentsObserver,
+   const raw_ptr<WeftUI> ui_;
+   const std::string id_;
+   std::string favicon_;
++  scoped_refptr<content::DevToolsAgentHost> agent_;
++  int devtools_seq_ = 0;
+ };
+ 
+ }  // namespace
+ 
+ struct WeftUI::Page {
++  std::string ws_id;
+   std::unique_ptr<content::WebContents> contents;
+   std::unique_ptr<PageObserver> observer;
+   // A private tab's own off-the-record profile and the workspace profile it
+@@ -509,6 +737,64 @@ void WeftUI::SetEnvironment(const std::string& ws_id,
+   } else {
+     WithWorkspace(ws_id, disposable, base::DoNothing());
+   }
++  EmulateWorkspace(ws_id, *ws.env);
++}
++
++void WeftUI::EmulateWorkspace(const std::string& ws_id,
++                              const base::DictValue& env) {
++  const std::string* tz = env.FindString("tz");
++  const std::string* locale = env.FindString("locale");
++  for (auto& [id, page] : pages_) {
++    if (page->ws_id == ws_id && page->observer) {
++      page->observer->Emulate(tz ? *tz : std::string(),
++                              locale ? *locale : std::string());
++    }
++  }
++}
++
++bool WeftUI::OnPageKey(const std::string& page_id,
++                       const std::string& key,
++                       const std::string& code,
++                       bool ctrl,
++                       bool meta,
++                       bool alt,
++                       bool in_input) {
++  // The same rules as the shell's handleKey (browser.ts), so both sides agree
++  // on which keys the page never sees.
++  const bool modifier =
++      key == "Shift" || key == "Control" || key == "Alt" || key == "Meta";
++  bool consumed;
++  if (modifier) {
++    consumed = leader_;
++  } else if (!leader_) {
++    consumed = (ctrl && code == "Space") ||
++               (key == "`" && !in_input && !ctrl && !meta && !alt);
++    if (consumed) {
++      leader_ = true;
++    }
++  } else {
++    leader_ = false;
++    consumed = true;
++  }
++  if (!consumed) {
++    return false;
++  }
++  base::DictValue e;
++  e.Set("type", "key");
++  e.Set("id", page_id);
++  e.Set("key", key);
++  e.Set("code", code);
++  e.Set("ctrl", ctrl);
++  e.Set("meta", meta);
++  e.Set("alt", alt);
++  e.Set("inInput", in_input);
++  Emit(std::move(e));
++  return true;
++}
++
++// static
++base::FilePath WeftUI::DataDir() {
++  return g_browser_process->profile_manager()->user_data_dir().Append("Weft");
+ }
+ 
+ // What a workspace's environment means to its profile: the network route as
+@@ -564,12 +850,14 @@ void WeftUI::WipeWorkspace(const std::string& ws_id) {
+ }
+ 
+ content::WebContents* WeftUI::CreatePage(const std::string& id,
++                                         const std::string& ws_id,
+                                          Profile* context,
+                                          Profile* private_owner) {
+   DestroyPage(id);
+   content::WebContents* shell = web_ui()->GetWebContents();
+   content::WebContents::CreateParams params(context);
+   auto page = std::make_unique<Page>();
++  page->ws_id = ws_id;
+   if (private_owner) {
+     page->private_profile = context;
+     page->private_owner = private_owner;
+@@ -584,6 +872,13 @@ content::WebContents* WeftUI::CreatePage(const std::string& id,
+     contents->Resize(gfx::Rect(seed));
+   }
+   contents->UpdateWebContentsVisibility(shell->GetVisibility());
++  auto ws = workspaces_.find(ws_id);
++  if (ws != workspaces_.end() && ws->second->env) {
++    const std::string* tz = ws->second->env->FindString("tz");
++    const std::string* locale = ws->second->env->FindString("locale");
++    page->observer->Emulate(tz ? *tz : std::string(),
++                            locale ? *locale : std::string());
++  }
+   pages_[id] = std::move(page);
+   return contents;
+ }
+diff --git a/chrome/browser/ui/webui/weft/weft_ui.h b/chrome/browser/ui/webui/weft/weft_ui.h
+index 4fc285fe52..37b1cb6952 100644
+--- a/chrome/browser/ui/webui/weft/weft_ui.h
++++ b/chrome/browser/ui/webui/weft/weft_ui.h
+@@ -11,6 +11,7 @@
+ #include <string>
+ #include <vector>
+ 
++#include "base/files/file_path.h"
+ #include "base/functional/callback.h"
+ #include "base/memory/raw_ptr.h"
+ #include "base/memory/weak_ptr.h"
+@@ -77,11 +78,28 @@ class WeftUI : public content::WebUIController {
+   // visibility: nothing native holds a page, so neither would arrive on its
+   // own.
+   content::WebContents* CreatePage(const std::string& id,
++                                   const std::string& ws_id,
+                                    Profile* context,
+                                    Profile* private_owner);
+   content::WebContents* GetPage(const std::string& id);
+   void DestroyPage(const std::string& id);
+ 
++  // A key pressed inside a page. The prefix key and what follows it are the
++  // shell's: this mirrors the shell's leader state so the decision to swallow
++  // the key can be made here, now, and reports the key to the shell. Returns
++  // whether the page should not see the key.
++  bool OnPageKey(const std::string& page_id,
++                 const std::string& key,
++                 const std::string& code,
++                 bool ctrl,
++                 bool meta,
++                 bool alt,
++                 bool in_input);
++  void SetLeader(bool on) { leader_ = on; }
++
++  // Weft's own files (state.json, env files) live in <user data dir>/Weft.
++  static base::FilePath DataDir();
++
+   // An event for the shell (window.__weft.event); dropped before the shell has
+   // asked for anything.
+   void Emit(base::DictValue event);
+@@ -94,10 +112,13 @@ class WeftUI : public content::WebUIController {
+   Profile* BaseProfile();
+   void OnWorkspaceProfile(const std::string& ws_id, Profile* profile);
+   static void ApplyEnvironment(Profile* profile, const base::DictValue& env);
++  // Timezone and locale emulation on every page of a workspace.
++  void EmulateWorkspace(const std::string& ws_id, const base::DictValue& env);
+ 
+   raw_ptr<WeftHandler> handler_ = nullptr;
+   std::map<std::string, std::unique_ptr<Page>> pages_;
+   std::map<std::string, std::unique_ptr<Workspace>> workspaces_;
++  bool leader_ = false;
+   base::WeakPtrFactory<WeftUI> weak_factory_{this};
+ };
+ 

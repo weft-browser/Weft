@@ -1,0 +1,9 @@
+name: Task or feature
+description: A piece of work, small enough for one pull request
+labels: [task]
+body:
+  - type: textarea
+    attributes: { label: Goal, description: What should be true when this is done, from the user's side. }
+    validations: { required: true }
+  - type: textarea
+    attributes: { label: Notes, description: "Where it lives in the code, constraints from AGENTS.md or product.md, how to verify it." }

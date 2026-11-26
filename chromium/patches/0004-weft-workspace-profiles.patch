@@ -1,0 +1,448 @@
+diff --git a/chrome/browser/ui/webui/weft/BUILD.gn b/chrome/browser/ui/webui/weft/BUILD.gn
+index 4ac69ca1d8..b96a56469e 100644
+--- a/chrome/browser/ui/webui/weft/BUILD.gn
++++ b/chrome/browser/ui/webui/weft/BUILD.gn
+@@ -10,7 +10,14 @@ source_set("weft") {
+   public_deps = [ "//content/public/browser" ]
+   deps = [
+     "//base",
++    "//chrome/browser:browser_process",
+     "//chrome/browser/profiles:profile",
++    "//chrome/browser/profiles:profile_manager",
++    "//components/content_settings/core/browser:cookie_settings",
++    "//components/content_settings/core/common",
++    "//components/language/core/browser",
++    "//components/prefs",
++    "//components/proxy_config",
+     "//chrome/browser/resources/weft:resources",
+     "//chrome/browser/ui/webui/sanitized_image:sanitized_image_source",
+     "//chrome/common",
+diff --git a/chrome/browser/ui/webui/weft/weft_ui.cc b/chrome/browser/ui/webui/weft/weft_ui.cc
+index 002e6f7a46..1b56c4f619 100644
+--- a/chrome/browser/ui/webui/weft/weft_ui.cc
++++ b/chrome/browser/ui/webui/weft/weft_ui.cc
+@@ -9,16 +9,27 @@
+ #include <utility>
+ #include <vector>
+ 
++#include "base/files/file_path.h"
+ #include "base/functional/bind.h"
++#include "base/functional/callback_helpers.h"
+ #include "base/logging.h"
+ #include "base/memory/raw_ptr.h"
++#include "base/memory/weak_ptr.h"
+ #include "base/strings/utf_string_conversions.h"
+ #include "base/values.h"
++#include "chrome/browser/browser_process.h"
+ #include "chrome/browser/profiles/profile.h"
++#include "chrome/browser/profiles/profile_manager.h"
+ #include "chrome/browser/ui/webui/sanitized_image/sanitized_image_source.h"
+ #include "chrome/common/webui_url_constants.h"
+ #include "chrome/grit/weft_resources.h"
+ #include "chrome/grit/weft_resources_map.h"
++#include "components/content_settings/core/browser/cookie_settings.h"
++#include "components/content_settings/core/common/pref_names.h"
++#include "components/language/core/browser/pref_names.h"
++#include "components/prefs/pref_service.h"
++#include "components/proxy_config/proxy_config_dictionary.h"
++#include "components/proxy_config/proxy_config_pref_names.h"
+ #include "components/surface_embed/browser/surface_embed_handle.h"
+ #include "components/version_info/version_info.h"
+ #include "content/public/browser/host_zoom_map.h"
+@@ -65,6 +76,12 @@ class WeftHandler : public content::WebUIMessageHandler {
+     web_ui()->RegisterMessageCallback(
+         "page", base::BindRepeating(&WeftHandler::Page,
+                                     base::Unretained(this)));
++    web_ui()->RegisterMessageCallback(
++        "setEnv", base::BindRepeating(&WeftHandler::SetEnv,
++                                      base::Unretained(this)));
++    web_ui()->RegisterMessageCallback(
++        "wipe", base::BindRepeating(&WeftHandler::Wipe,
++                                    base::Unretained(this)));
+   }
+ 
+   void Emit(const base::DictValue& event) {
+@@ -86,24 +103,74 @@ class WeftHandler : public content::WebUIMessageHandler {
+     CallJavascriptFunction("__weft.resolve", args[0], reply);
+   }
+ 
+-  // [requestId, pageId, url] -> {contentId}: a page loading `url`, ready for
+-  // a surface-embed element in the shell.
++  // [requestId, pageId, url, wsId, mode] -> {contentId} | {error}: a page
++  // loading `url` in the workspace's profile ("persist" | "disposable") or in
++  // a private off-the-record profile of it ("private"), ready for a
++  // surface-embed element in the shell. Replies once the profile is loaded.
+   void CreatePage(const base::ListValue& args) {
+     AllowJavascript();
+     const std::string* id = Str(args, 1);
+     const std::string* url = Str(args, 2);
++    const std::string* ws = Str(args, 3);
++    const std::string* mode = Str(args, 4);
+     if (!id) {
+       return;
+     }
+-    content::WebContents* page = controller_->CreatePage(*id);
+-    if (url && !url->empty()) {
++    const std::string m = mode ? *mode : "persist";
++    controller_->WithWorkspace(
++        ws ? *ws : std::string(), m == "disposable",
++        base::BindOnce(&WeftHandler::FinishCreatePage,
++                       weak_factory_.GetWeakPtr(), args[0].Clone(), *id,
++                       url ? *url : std::string(), m == "private"));
++  }
++
++  void FinishCreatePage(base::Value request_id,
++                        const std::string& id,
++                        const std::string& url,
++                        bool is_private,
++                        Profile* profile) {
++    base::DictValue reply;
++    if (!profile) {
++      reply.Set("error", "the workspace's profile could not be loaded");
++      CallJavascriptFunction("__weft.resolve", request_id, reply);
++      return;
++    }
++    Profile* context = profile;
++    Profile* private_owner = nullptr;
++    if (is_private && !profile->IsOffTheRecord()) {
++      context = profile->GetOffTheRecordProfile(
++          Profile::OTRProfileID::CreateUnique("weft::private"),
++          /*create_if_needed=*/true);
++      private_owner = profile;
++    }
++    content::WebContents* page =
++        controller_->CreatePage(id, context, private_owner);
++    if (!url.empty()) {
+       page->GetController().LoadURLWithParams(
+-          content::NavigationController::LoadURLParams(GURL(*url)));
++          content::NavigationController::LoadURLParams(GURL(url)));
+     }
+     auto* handle = surface_embed::SurfaceEmbedHandle::CreateForWebContents(page);
+-    base::DictValue reply;
+     reply.Set("contentId", handle->id().ToString());
+-    CallJavascriptFunction("__weft.resolve", args[0], reply);
++    CallJavascriptFunction("__weft.resolve", request_id, reply);
++  }
++
++  // [wsId, disposable, {rules, locale}]
++  void SetEnv(const base::ListValue& args) {
++    AllowJavascript();
++    const std::string* ws = Str(args, 0);
++    if (!ws || args.size() < 3 || !args[2].is_dict()) {
++      return;
++    }
++    controller_->SetEnvironment(*ws, args.size() > 1 && args[1].GetIfBool().value_or(false),
++                                args[2].GetDict().Clone());
++  }
++
++  // [wsId]
++  void Wipe(const base::ListValue& args) {
++    AllowJavascript();
++    if (const std::string* ws = Str(args, 0)) {
++      controller_->WipeWorkspace(*ws);
++    }
+   }
+ 
+   // [pageId, action, arg]
+@@ -161,6 +228,7 @@ class WeftHandler : public content::WebUIMessageHandler {
+   }
+ 
+   const raw_ptr<WeftUI> controller_;
++  base::WeakPtrFactory<WeftHandler> weak_factory_{this};
+ };
+ 
+ namespace {
+@@ -304,6 +372,18 @@ class PageObserver : public content::WebContentsObserver,
+ struct WeftUI::Page {
+   std::unique_ptr<content::WebContents> contents;
+   std::unique_ptr<PageObserver> observer;
++  // A private tab's own off-the-record profile and the workspace profile it
++  // hangs off; destroyed with the page, and its storage with it.
++  raw_ptr<Profile> private_profile = nullptr;
++  raw_ptr<Profile> private_owner = nullptr;
++};
++
++struct WeftUI::Workspace {
++  raw_ptr<Profile> profile = nullptr;
++  bool disposable = false;
++  bool loading = false;
++  std::optional<base::DictValue> env;
++  std::vector<base::OnceCallback<void(Profile*)>> waiting;
+ };
+ 
+ WeftUIConfig::WeftUIConfig()
+@@ -338,18 +418,162 @@ WeftUI::WeftUI(content::WebUI* web_ui) : content::WebUIController(web_ui) {
+ }
+ 
+ WeftUI::~WeftUI() {
+-  // Observers first: they are the pages' delegates.
++  // Pages before the profiles they live in; observers first, they are the
++  // pages' delegates.
++  std::vector<std::string> ids;
+   for (auto& [id, page] : pages_) {
+-    page->observer.reset();
++    ids.push_back(id);
++  }
++  for (const std::string& id : ids) {
++    DestroyPage(id);
++  }
++  Profile* base = BaseProfile();
++  for (auto& [id, ws] : workspaces_) {
++    if (ws->disposable && ws->profile) {
++      base->DestroyOffTheRecordProfile(ws->profile);
++    }
+   }
+   handler_ = nullptr;
+ }
+ 
+-content::WebContents* WeftUI::CreatePage(const std::string& id) {
++// The regular profile workspaces hang off. The shell itself may be running in
++// an off-the-record one (a Playwright context is), and only a regular profile
++// can create and destroy off-the-record profiles.
++Profile* WeftUI::BaseProfile() {
++  return Profile::FromWebUI(web_ui())->GetOriginalProfile();
++}
++
++void WeftUI::WithWorkspace(const std::string& ws_id,
++                           bool disposable,
++                           base::OnceCallback<void(Profile*)> ready) {
++  Profile* base = BaseProfile();
++  if (ws_id.empty()) {
++    std::move(ready).Run(base);
++    return;
++  }
++  Workspace& ws =
++      *workspaces_.try_emplace(ws_id, std::make_unique<Workspace>())
++           .first->second;
++  if (ws.profile) {
++    std::move(ready).Run(ws.profile);
++    return;
++  }
++  ws.waiting.push_back(std::move(ready));
++  if (ws.loading) {
++    return;
++  }
++  ws.loading = true;
++  if (disposable) {
++    // In memory only: gone, with everything it stored, when the workspace is.
++    ws.disposable = true;
++    OnWorkspaceProfile(
++        ws_id, base->GetOffTheRecordProfile(
++                   Profile::OTRProfileID::CreateUnique("weft::disposable"),
++                   /*create_if_needed=*/true));
++    return;
++  }
++  ProfileManager* manager = g_browser_process->profile_manager();
++  manager->CreateProfileAsync(
++      manager->user_data_dir().Append("Weft-" + ws_id),
++      base::BindOnce(&WeftUI::OnWorkspaceProfile, weak_factory_.GetWeakPtr(),
++                     ws_id));
++}
++
++void WeftUI::OnWorkspaceProfile(const std::string& ws_id, Profile* profile) {
++  auto it = workspaces_.find(ws_id);
++  if (it == workspaces_.end()) {
++    return;
++  }
++  Workspace& ws = *it->second;
++  ws.loading = false;
++  ws.profile = profile;
++  if (profile && ws.env) {
++    ApplyEnvironment(profile, *ws.env);
++  }
++  std::vector<base::OnceCallback<void(Profile*)>> waiting =
++      std::move(ws.waiting);
++  for (auto& cb : waiting) {
++    std::move(cb).Run(profile);
++  }
++}
++
++void WeftUI::SetEnvironment(const std::string& ws_id,
++                            bool disposable,
++                            base::DictValue env) {
++  Workspace& ws =
++      *workspaces_.try_emplace(ws_id, std::make_unique<Workspace>())
++           .first->second;
++  ws.env = std::move(env);
++  if (ws.profile) {
++    ApplyEnvironment(ws.profile, *ws.env);
++  } else {
++    WithWorkspace(ws_id, disposable, base::DoNothing());
++  }
++}
++
++// What a workspace's environment means to its profile: the network route as
++// the profile's proxy pref (direct, or fixed servers: a proxy, Tor, a tunnel's
++// SOCKS endpoint; `<local>` bypassed), the locale as Accept-Language, and
++// third-party cookies off, always. Timezone and locale emulation per page are
++// Phase 1 follow-ups (plan.md).
++void WeftUI::ApplyEnvironment(Profile* profile, const base::DictValue& env) {
++  PrefService* prefs = profile->GetPrefs();
++  const std::string* rules = env.FindString("rules");
++  prefs->SetDict(proxy_config::prefs::kProxy,
++                 rules && !rules->empty()
++                     ? ProxyConfigDictionary::CreateFixedServers(*rules, "<local>")
++                     : ProxyConfigDictionary::CreateDirect());
++  if (const std::string* locale = env.FindString("locale");
++      locale && !locale->empty()) {
++    // Language codes only; the network service adds the q-values (and
++    // DCHECKs on a ';'). The selected-languages pref is the source of truth:
++    // LanguagePrefs rewrites Accept-Language from it, so both are set.
++    const std::string lang = locale->substr(0, locale->find('-'));
++    const std::string languages =
++        lang == *locale ? *locale : *locale + "," + lang;
++    prefs->SetString(language::prefs::kSelectedLanguages, languages);
++    prefs->SetString(language::prefs::kAcceptLanguages, languages);
++  }
++  prefs->SetInteger(
++      prefs::kCookieControlsMode,
++      static_cast<int>(content_settings::CookieControlsMode::kBlockThirdParty));
++}
++
++void WeftUI::WipeWorkspace(const std::string& ws_id) {
++  auto it = workspaces_.find(ws_id);
++  if (it == workspaces_.end()) {
++    return;
++  }
++  Workspace& ws = *it->second;
++  if (ws.profile) {
++    std::vector<std::string> ids;
++    for (auto& [id, page] : pages_) {
++      if (page->contents &&
++          page->contents->GetBrowserContext() == ws.profile) {
++        ids.push_back(id);
++      }
++    }
++    for (const std::string& id : ids) {
++      DestroyPage(id);
++    }
++    if (ws.disposable) {
++      BaseProfile()->DestroyOffTheRecordProfile(ws.profile);
++    }
++  }
++  workspaces_.erase(it);
++}
++
++content::WebContents* WeftUI::CreatePage(const std::string& id,
++                                         Profile* context,
++                                         Profile* private_owner) {
+   DestroyPage(id);
+   content::WebContents* shell = web_ui()->GetWebContents();
+-  content::WebContents::CreateParams params(shell->GetBrowserContext());
++  content::WebContents::CreateParams params(context);
+   auto page = std::make_unique<Page>();
++  if (private_owner) {
++    page->private_profile = context;
++    page->private_owner = private_owner;
++  }
+   page->contents = content::WebContents::Create(params);
+   content::WebContents* contents = page->contents.get();
+   page->observer = std::make_unique<PageObserver>(this, id, contents);
+@@ -374,8 +598,14 @@ void WeftUI::DestroyPage(const std::string& id) {
+   if (it == pages_.end()) {
+     return;
+   }
+-  it->second->observer.reset();
++  std::unique_ptr<Page> page = std::move(it->second);
+   pages_.erase(it);
++  page->observer.reset();
++  page->contents.reset();
++  if (page->private_profile) {
++    // A private tab's storage lives only as long as the tab.
++    page->private_owner->DestroyOffTheRecordProfile(page->private_profile);
++  }
+ }
+ 
+ void WeftUI::Emit(base::DictValue event) {
+diff --git a/chrome/browser/ui/webui/weft/weft_ui.h b/chrome/browser/ui/webui/weft/weft_ui.h
+index fb46f7f37d..4fc285fe52 100644
+--- a/chrome/browser/ui/webui/weft/weft_ui.h
++++ b/chrome/browser/ui/webui/weft/weft_ui.h
+@@ -7,13 +7,19 @@
+ 
+ #include <map>
+ #include <memory>
++#include <optional>
+ #include <string>
++#include <vector>
+ 
++#include "base/functional/callback.h"
+ #include "base/memory/raw_ptr.h"
++#include "base/memory/weak_ptr.h"
+ #include "base/values.h"
+ #include "content/public/browser/web_ui_controller.h"
+ #include "content/public/browser/webui_config.h"
+ 
++class Profile;
++
+ namespace content {
+ class WebContents;
+ }  // namespace content
+@@ -33,10 +39,13 @@ class WeftUIConfig : public content::DefaultWebUIConfig<WeftUI> {
+ // unchanged, plus a controller (shell/controller.ts in the fork repo) that
+ // owns the browser model, as browser.ts does in Electron.
+ //
+-// This side is the engine: pages (the tabs' WebContents) are created, driven
+-// and observed here, and painted inside the shell through
++// This side is the engine. A workspace is a Profile: a persistent one in its
++// own directory under the user data dir, or an off-the-record one for a
++// disposable workspace; a private tab is an off-the-record profile of its
++// workspace's. Pages (the tabs' WebContents) are created in those, driven and
++// observed here, and painted inside the shell through
+ // //components/surface_embed, the mechanism Chromium's own WebUI browser
+-// frame uses. The shell renders an
++// frame uses: the shell renders an
+ // <embed type="application/x-chromium-surface-embed" data-content-id=...>
+ // where each page goes.
+ class WeftUI : public content::WebUIController {
+@@ -48,10 +57,28 @@ class WeftUI : public content::WebUIController {
+ 
+   ~WeftUI() override;
+ 
+-  // A page with the shell's id for it, in this WebUI's browser context; the
+-  // controller keeps ownership. Seeded with the shell's size and visibility:
+-  // nothing native holds a page, so neither would arrive on its own.
+-  content::WebContents* CreatePage(const std::string& id);
++  // Runs `ready` with the workspace's profile, loading or creating it first
++  // (null when that failed). An empty id is the shell's own profile.
++  void WithWorkspace(const std::string& ws_id,
++                     bool disposable,
++                     base::OnceCallback<void(Profile*)> ready);
++  // The workspace's environment ({rules, locale}): applied to its profile now
++  // or when it loads. See ApplyEnvironment.
++  void SetEnvironment(const std::string& ws_id,
++                      bool disposable,
++                      base::DictValue env);
++  // Forgets a workspace; a disposable one's off-the-record profile, and so
++  // everything it stored, goes with it.
++  void WipeWorkspace(const std::string& ws_id);
++
++  // A page with the shell's id for it, in `context` (a workspace's profile,
++  // or a private off-the-record profile of it, which the page then owns);
++  // the controller keeps ownership. Seeded with the shell's size and
++  // visibility: nothing native holds a page, so neither would arrive on its
++  // own.
++  content::WebContents* CreatePage(const std::string& id,
++                                   Profile* context,
++                                   Profile* private_owner);
+   content::WebContents* GetPage(const std::string& id);
+   void DestroyPage(const std::string& id);
+ 
+@@ -61,10 +88,17 @@ class WeftUI : public content::WebUIController {
+ 
+  private:
+   struct Page;
++  struct Workspace;
+   WEB_UI_CONTROLLER_TYPE_DECL();
+ 
++  Profile* BaseProfile();
++  void OnWorkspaceProfile(const std::string& ws_id, Profile* profile);
++  static void ApplyEnvironment(Profile* profile, const base::DictValue& env);
++
+   raw_ptr<WeftHandler> handler_ = nullptr;
+   std::map<std::string, std::unique_ptr<Page>> pages_;
++  std::map<std::string, std::unique_ptr<Workspace>> workspaces_;
++  base::WeakPtrFactory<WeftUI> weak_factory_{this};
+ };
+ 
+ }  // namespace weft

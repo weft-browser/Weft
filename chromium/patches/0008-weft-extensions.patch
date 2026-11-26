@@ -1,0 +1,301 @@
+diff --git a/chrome/browser/ui/webui/weft/BUILD.gn b/chrome/browser/ui/webui/weft/BUILD.gn
+index c33e70d081..8df6726bc7 100644
+--- a/chrome/browser/ui/webui/weft/BUILD.gn
++++ b/chrome/browser/ui/webui/weft/BUILD.gn
+@@ -2,6 +2,8 @@
+ # Use of this source code is governed by a BSD-style license that can be
+ # found in the LICENSE file.
+ 
++import("//extensions/buildflags/buildflags.gni")
++
+ source_set("weft") {
+   sources = [
+     "weft_ui.cc",
+@@ -20,6 +22,7 @@ source_set("weft") {
+     "//components/prefs",
+     "//components/proxy_config",
+     "//chrome/browser/resources/weft:resources",
++    "//chrome/browser/sessions",
+     "//chrome/browser/ui/webui/sanitized_image:sanitized_image_source",
+     "//chrome/browser/weft",
+     "//chrome/common",
+@@ -27,6 +30,7 @@ source_set("weft") {
+     "//components/surface_embed/browser",
+     "//components/version_info",
+     "//content/public/common",
++    "//extensions/buildflags",
+     "//net",
+     "//services/network/public/mojom",
+     "//third_party/blink/public/common",
+@@ -37,4 +41,11 @@ source_set("weft") {
+     "//ui/webui",
+     "//url",
+   ]
++  if (enable_extensions) {
++    deps += [
++      "//chrome/browser/extensions",
++      "//extensions/browser",
++      "//extensions/common",
++    ]
++  }
+ }
+diff --git a/chrome/browser/ui/webui/weft/weft_ui.cc b/chrome/browser/ui/webui/weft/weft_ui.cc
+index a491adabe2..67a2091133 100644
+--- a/chrome/browser/ui/webui/weft/weft_ui.cc
++++ b/chrome/browser/ui/webui/weft/weft_ui.cc
+@@ -4,7 +4,10 @@
+ 
+ #include "chrome/browser/ui/webui/weft/weft_ui.h"
+ 
++#include <algorithm>
++#include <map>
+ #include <memory>
++#include <set>
+ #include <string>
+ #include <utility>
+ #include <vector>
+@@ -20,13 +23,16 @@
+ #include "base/logging.h"
+ #include "base/memory/raw_ptr.h"
+ #include "base/memory/weak_ptr.h"
++#include "base/one_shot_event.h"
+ #include "base/strings/utf_string_conversions.h"
++#include "base/task/single_thread_task_runner.h"
+ #include "base/task/thread_pool.h"
+ #include "base/time/time.h"
+ #include "base/values.h"
+ #include "chrome/browser/browser_process.h"
+ #include "chrome/browser/profiles/profile.h"
+ #include "chrome/browser/profiles/profile_manager.h"
++#include "chrome/browser/sessions/session_tab_helper_factory.h"
+ #include "chrome/browser/ui/webui/sanitized_image/sanitized_image_source.h"
+ #include "chrome/browser/weft/tracker_throttle.h"
+ #include "chrome/common/webui_url_constants.h"
+@@ -59,6 +65,7 @@
+ #include "content/public/browser/web_ui_data_source.h"
+ #include "content/public/browser/web_ui_message_handler.h"
+ #include "content/public/common/url_constants.h"
++#include "extensions/buildflags/buildflags.h"
+ #include "net/base/registry_controlled_domains/registry_controlled_domain.h"
+ #include "services/network/public/mojom/content_security_policy.mojom.h"
+ #include "third_party/blink/public/common/input/web_input_event.h"
+@@ -75,6 +82,16 @@
+ #include "url/gurl.h"
+ #include "url/origin.h"
+ 
++#if BUILDFLAG(ENABLE_EXTENSIONS)
++#include "chrome/browser/extensions/chrome_extension_web_contents_observer.h"
++#include "extensions/browser/disable_reason.h"
++#include "extensions/browser/extension_registrar.h"
++#include "extensions/browser/extension_registry.h"
++#include "extensions/browser/extension_system.h"
++#include "extensions/browser/unpacked_installer.h"
++#include "extensions/common/extension.h"
++#endif
++
+ namespace weft {
+ 
+ namespace {
+@@ -128,6 +145,20 @@ std::vector<std::string> ListDirTask(base::FilePath path) {
+   return names;
+ }
+ 
++// Unpacked extensions: every folder under <data dir>/extensions with a
++// manifest.json, sorted (store.ts listExtensions).
++std::vector<std::string> ListExtensionsTask(base::FilePath path) {
++  std::vector<std::string> names;
++  base::FileEnumerator it(path, false, base::FileEnumerator::DIRECTORIES);
++  for (base::FilePath f = it.Next(); !f.empty(); f = it.Next()) {
++    if (base::PathExists(f.Append("manifest.json"))) {
++      names.push_back(f.BaseName().value());
++    }
++  }
++  std::sort(names.begin(), names.end());
++  return names;
++}
++
+ }  // namespace
+ 
+ // The browser half of the engine protocol (shell/engine.ts in the fork repo).
+@@ -180,6 +211,9 @@ class WeftHandler : public content::WebUIMessageHandler {
+     web_ui()->RegisterMessageCallback(
+         "listDir", base::BindRepeating(&WeftHandler::ListDir,
+                                        base::Unretained(this)));
++    web_ui()->RegisterMessageCallback(
++        "listExtensions", base::BindRepeating(&WeftHandler::ListExtensions,
++                                              base::Unretained(this)));
+   }
+ 
+   void Emit(const base::DictValue& event) {
+@@ -287,6 +321,17 @@ class WeftHandler : public content::WebUIMessageHandler {
+                        args[0].Clone()));
+   }
+ 
++  // [requestId] -> {names}: the unpacked extensions available to workspaces.
++  void ListExtensions(const base::ListValue& args) {
++    AllowJavascript();
++    base::ThreadPool::PostTaskAndReplyWithResult(
++        FROM_HERE, {base::MayBlock(), base::TaskPriority::USER_VISIBLE},
++        base::BindOnce(&ListExtensionsTask,
++                       WeftUI::DataDir().Append("extensions")),
++        base::BindOnce(&WeftHandler::ResolveNames, weak_factory_.GetWeakPtr(),
++                       args[0].Clone()));
++  }
++
+   void Resolve(base::Value request_id, std::optional<std::string> text) {
+     base::DictValue reply;
+     if (text) {
+@@ -674,6 +719,9 @@ struct WeftUI::Workspace {
+   bool loading = false;
+   std::optional<base::DictValue> env;
+   std::vector<base::OnceCallback<void(Profile*)>> waiting;
++  // Unpacked extensions by folder name: the extension id once loaded.
++  std::map<std::string, std::string> ext_ids;
++  std::set<std::string> ext_loading;
+ };
+ 
+ WeftUIConfig::WeftUIConfig()
+@@ -779,6 +827,7 @@ void WeftUI::OnWorkspaceProfile(const std::string& ws_id, Profile* profile) {
+   ws.profile = profile;
+   if (profile && ws.env) {
+     ApplyEnvironment(profile, *ws.env);
++    ApplyExtensions(ws_id);
+   }
+   std::vector<base::OnceCallback<void(Profile*)>> waiting =
+       std::move(ws.waiting);
+@@ -796,12 +845,102 @@ void WeftUI::SetEnvironment(const std::string& ws_id,
+   ws.env = std::move(env);
+   if (ws.profile) {
+     ApplyEnvironment(ws.profile, *ws.env);
++    ApplyExtensions(ws_id);
+   } else {
+     WithWorkspace(ws_id, disposable, base::DoNothing());
+   }
+   EmulateWorkspace(ws_id, *ws.env);
+ }
+ 
++void WeftUI::ApplyExtensions(const std::string& ws_id) {
++#if BUILDFLAG(ENABLE_EXTENSIONS)
++  auto it = workspaces_.find(ws_id);
++  if (it == workspaces_.end() || !it->second->profile || !it->second->env) {
++    return;
++  }
++  Workspace& ws = *it->second;
++  // An off-the-record profile takes its extensions from the regular one it
++  // hangs off, which every disposable workspace shares: none there.
++  if (ws.profile->IsOffTheRecord()) {
++    return;
++  }
++  const base::DictValue* ext = ws.env->FindDict("ext");
++  if (!ext) {
++    return;
++  }
++  // A profile made moments ago is still bringing its extension system up;
++  // loading into it before then trips the registry.
++  auto* system = extensions::ExtensionSystem::Get(ws.profile);
++  if (!system->is_ready()) {
++    system->ready().Post(FROM_HERE,
++                         base::BindOnce(&WeftUI::ApplyExtensions,
++                                        weak_factory_.GetWeakPtr(), ws_id));
++    return;
++  }
++  auto* registrar = extensions::ExtensionRegistrar::Get(ws.profile);
++  auto* registry = extensions::ExtensionRegistry::Get(ws.profile);
++  for (const auto [name, on] : *ext) {
++    const bool wanted = on.GetIfBool().value_or(false);
++    auto loaded = ws.ext_ids.find(name);
++    if (loaded != ws.ext_ids.end()) {
++      const std::string& id = loaded->second;
++      if (wanted && registry->disabled_extensions().Contains(id)) {
++        registrar->EnableExtension(id);
++      } else if (!wanted && registry->enabled_extensions().Contains(id)) {
++        registrar->DisableExtension(
++            id, {extensions::disable_reason::DISABLE_USER_ACTION});
++      }
++      continue;
++    }
++    if (!wanted || ws.ext_loading.count(name) ||
++        name.find('/') != std::string::npos || name == "..") {
++      continue;
++    }
++    ws.ext_loading.insert(name);
++    auto installer = extensions::UnpackedInstaller::Create(ws.profile);
++    installer->set_be_noisy_on_failure(false);
++    installer->set_completion_callback(base::BindOnce(
++        [](base::WeakPtr<WeftUI> ui, const std::string& ws_id,
++           const std::string& name, const extensions::Extension* extension,
++           const base::FilePath&, const std::u16string& error) {
++          if (ui) {
++            ui->OnExtensionLoaded(ws_id, name,
++                                  extension ? extension->id() : std::string(),
++                                  base::UTF16ToUTF8(error));
++          }
++        },
++        weak_factory_.GetWeakPtr(), ws_id, name));
++    installer->Load(DataDir().Append("extensions").Append(name));
++  }
++#endif
++}
++
++void WeftUI::OnExtensionLoaded(const std::string& ws_id,
++                               const std::string& name,
++                               const std::string& id,
++                               const std::string& error) {
++  auto it = workspaces_.find(ws_id);
++  if (it == workspaces_.end()) {
++    return;
++  }
++  Workspace& ws = *it->second;
++  ws.ext_loading.erase(name);
++  if (id.empty()) {
++    base::DictValue e;
++    e.Set("type", "warn");
++    e.Set("text", "Could not load \"" + name + "\": " +
++                      (error.empty() ? "not an extension" : error));
++    Emit(std::move(e));
++    return;
++  }
++  ws.ext_ids[name] = id;
++  // The switch may have moved while it loaded; settle it once the installer's
++  // own stack has unwound (the registry is mid-update when this runs).
++  base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
++      FROM_HERE, base::BindOnce(&WeftUI::ApplyExtensions,
++                                weak_factory_.GetWeakPtr(), ws_id));
++}
++
+ void WeftUI::EmulateWorkspace(const std::string& ws_id,
+                               const base::DictValue& env) {
+   const std::string* tz = env.FindString("tz");
+@@ -977,6 +1116,14 @@ content::WebContents* WeftUI::CreatePage(const std::string& id,
+   page->contents = content::WebContents::Create(params);
+   content::WebContents* contents = page->contents.get();
+   page->observer = std::make_unique<PageObserver>(this, id, contents);
++  // What Chrome's tab helpers give a tab, so the workspace's extensions meet
++  // the page: a tab id (content scripts and tabs.* key off it) and the
++  // extension observer (content scripts, messaging).
++  CreateSessionServiceTabHelper(contents);
++#if BUILDFLAG(ENABLE_EXTENSIONS)
++  extensions::ChromeExtensionWebContentsObserver::CreateForWebContents(
++      contents);
++#endif
+   // Seeded as WebUIBrowserWindow::OnActiveTabChanged does, or the page lays
+   // out in a zero viewport and never produces a frame.
+   const gfx::Size seed = shell->GetContainerBounds().size();
+diff --git a/chrome/browser/ui/webui/weft/weft_ui.h b/chrome/browser/ui/webui/weft/weft_ui.h
+index 1c9491f3aa..983fac5fb6 100644
+--- a/chrome/browser/ui/webui/weft/weft_ui.h
++++ b/chrome/browser/ui/webui/weft/weft_ui.h
+@@ -120,6 +120,13 @@ class WeftUI : public content::WebUIController {
+   Profile* BaseProfile();
+   void OnWorkspaceProfile(const std::string& ws_id, Profile* profile);
+   static void ApplyEnvironment(Profile* profile, const base::DictValue& env);
++  // The workspace's unpacked extensions (<data dir>/extensions/<name>) loaded
++  // into its profile, enabled or disabled as its environment says.
++  void ApplyExtensions(const std::string& ws_id);
++  void OnExtensionLoaded(const std::string& ws_id,
++                         const std::string& name,
++                         const std::string& id,
++                         const std::string& error);
+   // Timezone and locale emulation on every page of a workspace.
+   void EmulateWorkspace(const std::string& ws_id, const base::DictValue& env);
+ 

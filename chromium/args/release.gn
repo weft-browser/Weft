@@ -1,0 +1,10 @@
+# What ships. Official build: optimised, static, slow (hours on a laptop).
+# Proprietary codecs (H.264/AAC) are off until their licensing is decided — see the root product.md.
+is_official_build = true
+is_debug = false
+is_component_build = false
+symbol_level = 1
+target_cpu = "arm64"
+chrome_pgo_phase = 0
+proprietary_codecs = false
+ffmpeg_branding = "Chromium"

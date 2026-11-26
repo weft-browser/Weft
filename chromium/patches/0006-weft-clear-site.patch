@@ -1,0 +1,157 @@
+diff --git a/chrome/browser/ui/webui/weft/BUILD.gn b/chrome/browser/ui/webui/weft/BUILD.gn
+index 4334b52080..ae70b730dc 100644
+--- a/chrome/browser/ui/webui/weft/BUILD.gn
++++ b/chrome/browser/ui/webui/weft/BUILD.gn
+@@ -26,6 +26,7 @@ source_set("weft") {
+     "//components/surface_embed/browser",
+     "//components/version_info",
+     "//content/public/common",
++    "//net",
+     "//services/network/public/mojom",
+     "//third_party/blink/public/common",
+     "//third_party/blink/public/mojom:mojom_platform",
+diff --git a/chrome/browser/ui/webui/weft/weft_ui.cc b/chrome/browser/ui/webui/weft/weft_ui.cc
+index e8b735e85b..adc3b6dccb 100644
+--- a/chrome/browser/ui/webui/weft/weft_ui.cc
++++ b/chrome/browser/ui/webui/weft/weft_ui.cc
+@@ -22,6 +22,7 @@
+ #include "base/memory/weak_ptr.h"
+ #include "base/strings/utf_string_conversions.h"
+ #include "base/task/thread_pool.h"
++#include "base/time/time.h"
+ #include "base/values.h"
+ #include "chrome/browser/browser_process.h"
+ #include "chrome/browser/profiles/profile.h"
+@@ -39,6 +40,8 @@
+ #include "components/surface_embed/browser/surface_embed_handle.h"
+ #include "components/input/native_web_keyboard_event.h"
+ #include "components/version_info/version_info.h"
++#include "content/public/browser/browsing_data_filter_builder.h"
++#include "content/public/browser/browsing_data_remover.h"
+ #include "content/public/browser/devtools_agent_host.h"
+ #include "content/public/browser/devtools_agent_host_client.h"
+ #include "content/public/browser/host_zoom_map.h"
+@@ -55,6 +58,7 @@
+ #include "content/public/browser/web_ui_data_source.h"
+ #include "content/public/browser/web_ui_message_handler.h"
+ #include "content/public/common/url_constants.h"
++#include "net/base/registry_controlled_domains/registry_controlled_domain.h"
+ #include "services/network/public/mojom/content_security_policy.mojom.h"
+ #include "third_party/blink/public/common/input/web_input_event.h"
+ #include "third_party/blink/public/common/input/web_keyboard_event.h"
+@@ -68,6 +72,7 @@
+ #include "ui/gfx/geometry/size.h"
+ #include "ui/webui/webui_util.h"
+ #include "url/gurl.h"
++#include "url/origin.h"
+ 
+ namespace weft {
+ 
+@@ -140,6 +145,9 @@ class WeftHandler : public content::WebUIMessageHandler {
+     web_ui()->RegisterMessageCallback(
+         "wipe", base::BindRepeating(&WeftHandler::Wipe,
+                                     base::Unretained(this)));
++    web_ui()->RegisterMessageCallback(
++        "clearSite", base::BindRepeating(&WeftHandler::ClearSite,
++                                         base::Unretained(this)));
+     web_ui()->RegisterMessageCallback(
+         "setLeader", base::BindRepeating(&WeftHandler::SetLeader,
+                                          base::Unretained(this)));
+@@ -338,6 +346,24 @@ class WeftHandler : public content::WebUIMessageHandler {
+     }
+   }
+ 
++  // [requestId, wsId, host] -> {} once the data is gone
++  void ClearSite(const base::ListValue& args) {
++    AllowJavascript();
++    const std::string* ws = Str(args, 1);
++    const std::string* host = Str(args, 2);
++    if (!ws || !host || host->empty()) {
++      return;
++    }
++    controller_->ClearSite(
++        *ws, *host,
++        base::BindOnce(&WeftHandler::ResolveEmpty, weak_factory_.GetWeakPtr(),
++                       args[0].Clone()));
++  }
++
++  void ResolveEmpty(base::Value request_id) {
++    CallJavascriptFunction("__weft.resolve", request_id, base::DictValue());
++  }
++
+   // [pageId, action, arg]
+   void Page(const base::ListValue& args) {
+     AllowJavascript();
+@@ -849,6 +875,56 @@ void WeftUI::WipeWorkspace(const std::string& ws_id) {
+   workspaces_.erase(it);
+ }
+ 
++void WeftUI::ClearSite(const std::string& ws_id,
++                       const std::string& host,
++                       base::OnceClosure done) {
++  auto it = workspaces_.find(ws_id);
++  Profile* profile = it == workspaces_.end() ? nullptr : it->second->profile.get();
++  if (!profile) {
++    std::move(done).Run();
++    return;
++  }
++  // By registrable domain: what cookie deletion matches on (an IP or an
++  // internal host is its own), and storage and cache follow it. The shell's
++  // host may carry a port (hostOf() in model.ts): dropped here.
++  const std::string hostname(GURL("http://" + host).host());
++  auto filter = content::BrowsingDataFilterBuilder::Create(
++      content::BrowsingDataFilterBuilder::Mode::kDelete);
++  const std::string domain =
++      net::registry_controlled_domains::GetDomainAndRegistry(
++          hostname,
++          net::registry_controlled_domains::INCLUDE_PRIVATE_REGISTRIES);
++  filter->AddRegisterableDomain(domain.empty() ? hostname : domain);
++  // The remover reports to a registered observer; this one lives for the task.
++  class Done : public content::BrowsingDataRemover::Observer {
++   public:
++    Done(content::BrowsingDataRemover* remover, base::OnceClosure done)
++        : remover_(remover), done_(std::move(done)) {
++      remover_->AddObserver(this);
++    }
++    void OnBrowsingDataRemoverDone(uint64_t failed_data_types) override {
++      LOG_IF(ERROR, failed_data_types)
++          << "weft: clearing site data failed for types " << failed_data_types;
++      remover_->RemoveObserver(this);
++      std::move(done_).Run();
++      delete this;
++    }
++
++   private:
++    const raw_ptr<content::BrowsingDataRemover> remover_;
++    base::OnceClosure done_;
++  };
++  content::BrowsingDataRemover* remover = profile->GetBrowsingDataRemover();
++  remover->RemoveWithFilterAndReply(
++      base::Time(), base::Time::Max(),
++      content::BrowsingDataRemover::DATA_TYPE_COOKIES |
++          content::BrowsingDataRemover::DATA_TYPE_DOM_STORAGE |
++          content::BrowsingDataRemover::DATA_TYPE_CACHE,
++      content::BrowsingDataRemover::ORIGIN_TYPE_UNPROTECTED_WEB |
++          content::BrowsingDataRemover::ORIGIN_TYPE_PROTECTED_WEB,
++      std::move(filter), new Done(remover, std::move(done)));
++}
++
+ content::WebContents* WeftUI::CreatePage(const std::string& id,
+                                          const std::string& ws_id,
+                                          Profile* context,
+diff --git a/chrome/browser/ui/webui/weft/weft_ui.h b/chrome/browser/ui/webui/weft/weft_ui.h
+index 37b1cb6952..6f7ebec878 100644
+--- a/chrome/browser/ui/webui/weft/weft_ui.h
++++ b/chrome/browser/ui/webui/weft/weft_ui.h
+@@ -71,6 +71,11 @@ class WeftUI : public content::WebUIController {
+   // Forgets a workspace; a disposable one's off-the-record profile, and so
+   // everything it stored, goes with it.
+   void WipeWorkspace(const std::string& ws_id);
++  // Cookies, storage and cache of one site (its registrable domain) in one
++  // workspace's profile; `done` runs when they are gone.
++  void ClearSite(const std::string& ws_id,
++                 const std::string& host,
++                 base::OnceClosure done);
+ 
+   // A page with the shell's id for it, in `context` (a workspace's profile,
+   // or a private off-the-record profile of it, which the page then owns);

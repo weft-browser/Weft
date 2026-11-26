@@ -1,0 +1,26 @@
+{
+  "v": 1,
+  "workspaces": [
+    {
+      "id": "ws-a", "name": "Studio", "color": "#6aa9ff", "icon": { "kind": "svg", "id": "code" },
+      "env": { "network": "direct", "region": "Seattle, US", "proxy": "", "locale": "en-US", "tz": "America/Los_Angeles", "fp": "standard", "disposable": false, "ext": { "uBlock Origin Lite": true } },
+      "tabs": [
+        { "id": "t1", "url": "https://gitlab.com/walnutlabs", "title": "Walnut Labs · GitLab", "pinned": true, "group": null, "icon": null, "favicon": "https://gitlab.com/favicon.ico" },
+        { "id": "t2", "url": "https://example.atlassian.net/jira", "title": "Jira", "pinned": false, "group": "g1", "icon": null, "favicon": null },
+        { "id": "t3", "url": "https://example.atlassian.net/wiki", "title": "Confluence", "pinned": false, "group": "g1", "icon": { "kind": "svg", "id": "book" }, "favicon": null }
+      ],
+      "groups": [{ "id": "g1", "name": "Atlassian", "color": "#5fd3e0", "collapsed": false }],
+      "active": 1
+    },
+    {
+      "id": "ws-b", "name": "Personal", "color": "#c79bff", "icon": null,
+      "env": { "network": "vpn", "region": "Zurich, CH", "proxy": "", "locale": "it-IT", "tz": "Europe/Zurich", "fp": "randomized", "disposable": false, "ext": {} },
+      "tabs": [{ "id": "t4", "url": "", "title": "New tab", "pinned": false, "group": null, "icon": null, "favicon": null }],
+      "groups": [],
+      "active": 0
+    }
+  ],
+  "activeWs": 1,
+  "closed": [{ "wsId": "ws-a", "tab": { "id": "t9", "url": "https://example.com", "title": "Example", "pinned": false, "group": null, "icon": null, "favicon": null } }],
+  "allow": { "ws-a|gitlab.com": true }
+}

@@ -1,0 +1,68 @@
+# Checks every pull request and main. No secrets are used here, so it is safe for forks.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  app:
+    name: app (check, test, build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: app
+    env:
+      # Type-checking, vitest and the bundles do not need the Electron binary.
+      ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - run: npm ci --no-audit --no-fund
+      - run: npm run check
+      - run: npm test
+      - run: npm run build
+      # The fork's shell imports the app's shared code by path: an app change must not break it.
+      - name: Type-check the fork's shell against the app
+        run: npx tsc -p ../chromium/shell --noEmit
+
+  chromium:
+    name: chromium (scripts, patches)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    defaults:
+      run:
+        working-directory: chromium
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # A Chromium build needs ~100 GB and hours, so CI checks what it can without a checkout.
+      - name: Scripts parse
+        run: for f in scripts/*.sh; do bash -n "$f"; done
+      - name: The pin is a real version
+        run: grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' CHROMIUM_VERSION
+      - name: Patches are well formed
+        run: for p in patches/*.patch; do [ -e "$p" ] || continue; git apply --stat "$p" >/dev/null; done
+
+  secrets:
+    name: secret scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: gitleaks
+        run: docker run --rm -v "$PWD:/repo" ghcr.io/gitleaks/gitleaks:v8.30.1 git /repo --redact --no-banner

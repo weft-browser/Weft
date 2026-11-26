@@ -1,0 +1,28 @@
+# Walnut Labs baseline .gitignore — copy to `.gitignore` when scaffolding a repo,
+# then append the stack-specific block from templates/README.md.
+
+# ── macOS Finder metadata ────────────────────────────────────────────────────
+# Not cosmetic. Finder rewrites .DS_Store whenever a folder is opened, so a repo
+# that tracks one is permanently dirty — and the rules auto-pull deliberately
+# SKIPS any repo with uncommitted changes, so it silently stops fast-forwarding.
+# Agents then read stale rules with nothing to indicate anything is wrong.
+.DS_Store
+
+# ── Editor and tooling scratch ───────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*~
+
+# ── Local environment ────────────────────────────────────────────────────────
+# Credentials live in CI variables and in the developer's own environment, never
+# in the repo. The committed example documents the shape without the values.
+.env
+.env.*
+!.env.example
+
+# ── Chromium checkout and build output (never committed) ─────────────────────
+/chromium/
+/depot_tools/
+/.gclient_entries
+*.pyc

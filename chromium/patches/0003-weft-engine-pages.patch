@@ -1,0 +1,553 @@
+diff --git a/chrome/browser/ui/webui/weft/BUILD.gn b/chrome/browser/ui/webui/weft/BUILD.gn
+index 2d5ce6001f..4ac69ca1d8 100644
+--- a/chrome/browser/ui/webui/weft/BUILD.gn
++++ b/chrome/browser/ui/webui/weft/BUILD.gn
+@@ -10,13 +10,18 @@ source_set("weft") {
+   public_deps = [ "//content/public/browser" ]
+   deps = [
+     "//base",
++    "//chrome/browser/profiles:profile",
+     "//chrome/browser/resources/weft:resources",
++    "//chrome/browser/ui/webui/sanitized_image:sanitized_image_source",
+     "//chrome/common",
+     "//components/guest_contents/browser",
+     "//components/surface_embed/browser",
+     "//components/version_info",
+     "//content/public/common",
+     "//services/network/public/mojom",
++    "//third_party/blink/public/common",
++    "//third_party/blink/public/mojom:mojom_platform",
++    "//ui/base",
+     "//ui/gfx/geometry",
+     "//ui/webui",
+     "//url",
+diff --git a/chrome/browser/ui/webui/weft/weft_ui.cc b/chrome/browser/ui/webui/weft/weft_ui.cc
+index a47d34b6b1..002e6f7a46 100644
+--- a/chrome/browser/ui/webui/weft/weft_ui.cc
++++ b/chrome/browser/ui/webui/weft/weft_ui.cc
+@@ -5,26 +5,39 @@
+ #include "chrome/browser/ui/webui/weft/weft_ui.h"
+ 
+ #include <memory>
+-#include <optional>
+ #include <string>
++#include <utility>
++#include <vector>
+ 
+ #include "base/functional/bind.h"
+-#include "base/json/json_reader.h"
+ #include "base/logging.h"
+ #include "base/memory/raw_ptr.h"
++#include "base/strings/utf_string_conversions.h"
+ #include "base/values.h"
++#include "chrome/browser/profiles/profile.h"
++#include "chrome/browser/ui/webui/sanitized_image/sanitized_image_source.h"
+ #include "chrome/common/webui_url_constants.h"
+ #include "chrome/grit/weft_resources.h"
+ #include "chrome/grit/weft_resources_map.h"
+ #include "components/surface_embed/browser/surface_embed_handle.h"
+ #include "components/version_info/version_info.h"
++#include "content/public/browser/host_zoom_map.h"
+ #include "content/public/browser/navigation_controller.h"
++#include "content/public/browser/navigation_entry.h"
++#include "content/public/browser/navigation_handle.h"
++#include "content/public/browser/render_frame_host.h"
++#include "content/public/browser/url_data_source.h"
+ #include "content/public/browser/web_contents.h"
++#include "content/public/browser/web_contents_delegate.h"
++#include "content/public/browser/web_contents_observer.h"
+ #include "content/public/browser/web_ui.h"
+ #include "content/public/browser/web_ui_data_source.h"
+ #include "content/public/browser/web_ui_message_handler.h"
+ #include "content/public/common/url_constants.h"
+ #include "services/network/public/mojom/content_security_policy.mojom.h"
++#include "third_party/blink/public/common/page/page_zoom.h"
++#include "third_party/blink/public/mojom/favicon/favicon_url.mojom.h"
++#include "ui/base/window_open_disposition.h"
+ #include "ui/gfx/geometry/rect.h"
+ #include "ui/gfx/geometry/size.h"
+ #include "ui/webui/webui_util.h"
+@@ -32,32 +45,9 @@
+ 
+ namespace weft {
+ 
+-namespace {
+-
+-// The BrowserState the shell receives until the browser owns the model
+-// (plan.md, Phase 2): one workspace with one empty tab, no VPN, no
+-// extensions, updates off. Shape: weft-browser-app/src/shared/model.ts.
+-constexpr char kStubState[] = R"json({
+-  "workspaces": [{
+-    "id": "ws-stub", "name": "Workspace 1", "color": "#6aa9ff", "icon": null,
+-    "env": {"network": "direct", "region": "Seattle, US", "proxy": "", "locale": "en-US",
+-            "tz": "America/Los_Angeles", "fp": "standard", "disposable": false, "ext": {}},
+-    "tabs": [{
+-      "id": "tab-stub", "url": "", "title": "New tab", "pinned": false, "group": null,
+-      "icon": null, "favicon": null, "private": false, "blocked": 0, "loading": false,
+-      "canBack": false, "canFwd": false, "history": [], "histPos": 0, "zoom": 1
+-    }],
+-    "groups": [], "active": 0
+-  }],
+-  "activeWs": 0, "closed": [], "leader": false, "pendingCloseWs": null, "extensions": [],
+-  "vpnRegions": ["Seattle, US", "New York, US", "Zurich, CH", "Frankfurt, DE", "Milan, IT", "Singapore, SG"],
+-  "vpnConfigured": [], "vpnStatus": {}, "vpnEngine": false, "vpnDir": "", "allow": {},
+-  "renameGroup": null, "uiScale": 1, "dataDir": "",
+-  "update": {"phase": "off", "current": "", "version": "", "percent": 0, "detail": ""}
+-})json";
+-
+-// The browser half of WeftApi. Replies go through window.__weft.resolve and
+-// events through window.__weft.event (shell/bridge.ts in the fork repo).
++// The browser half of the engine protocol (shell/engine.ts in the fork repo).
++// Replies go through window.__weft.resolve(requestId, reply) and events
++// through window.__weft.event(event).
+ class WeftHandler : public content::WebUIMessageHandler {
+  public:
+   explicit WeftHandler(WeftUI* controller) : controller_(controller) {}
+@@ -67,41 +57,46 @@ class WeftHandler : public content::WebUIMessageHandler {
+ 
+   void RegisterMessages() override {
+     web_ui()->RegisterMessageCallback(
+-        "getState", base::BindRepeating(&WeftHandler::GetState,
+-                                        base::Unretained(this)));
+-    web_ui()->RegisterMessageCallback(
+-        "command", base::BindRepeating(&WeftHandler::Command,
++        "getBoot", base::BindRepeating(&WeftHandler::GetBoot,
+                                        base::Unretained(this)));
+     web_ui()->RegisterMessageCallback(
+-        "openPage", base::BindRepeating(&WeftHandler::OpenPage,
+-                                        base::Unretained(this)));
++        "createPage", base::BindRepeating(&WeftHandler::CreatePage,
++                                          base::Unretained(this)));
++    web_ui()->RegisterMessageCallback(
++        "page", base::BindRepeating(&WeftHandler::Page,
++                                    base::Unretained(this)));
++  }
++
++  void Emit(const base::DictValue& event) {
++    if (IsJavascriptAllowed()) {
++      CallJavascriptFunction("__weft.event", event);
++    }
+   }
+ 
+  private:
+-  // [requestId] -> resolve(requestId, BrowserState)
+-  void GetState(const base::ListValue& args) {
+-    AllowJavascript();
+-    std::optional<base::Value> state =
+-        base::JSONReader::Read(kStubState, base::JSON_PARSE_RFC);
+-    CHECK(state && state->is_dict());
+-    state->GetDict().SetByDottedPath(
+-        "update.current", std::string(version_info::GetVersionNumber()));
+-    CallJavascriptFunction("__weft.resolve", args[0], *state);
++  static const std::string* Str(const base::ListValue& args, size_t i) {
++    return args.size() > i ? args[i].GetIfString() : nullptr;
+   }
+ 
+-  // [Command] (weft-browser-app/src/shared/ipc.ts)
+-  void Command(const base::ListValue& args) {
++  // [requestId] -> {version}
++  void GetBoot(const base::ListValue& args) {
+     AllowJavascript();
+-    VLOG(1) << "weft command: " << args;
++    base::DictValue reply;
++    reply.Set("version", std::string(version_info::GetVersionNumber()));
++    CallJavascriptFunction("__weft.resolve", args[0], reply);
+   }
+ 
+-  // [requestId, url] -> resolve(requestId, {contentId}): a page loading `url`,
+-  // ready for a surface-embed element in the shell.
+-  void OpenPage(const base::ListValue& args) {
++  // [requestId, pageId, url] -> {contentId}: a page loading `url`, ready for
++  // a surface-embed element in the shell.
++  void CreatePage(const base::ListValue& args) {
+     AllowJavascript();
+-    const std::string* url = args.size() > 1 ? args[1].GetIfString() : nullptr;
+-    content::WebContents* page = controller_->OpenPage();
+-    if (url) {
++    const std::string* id = Str(args, 1);
++    const std::string* url = Str(args, 2);
++    if (!id) {
++      return;
++    }
++    content::WebContents* page = controller_->CreatePage(*id);
++    if (url && !url->empty()) {
+       page->GetController().LoadURLWithParams(
+           content::NavigationController::LoadURLParams(GURL(*url)));
+     }
+@@ -111,54 +106,282 @@ class WeftHandler : public content::WebUIMessageHandler {
+     CallJavascriptFunction("__weft.resolve", args[0], reply);
+   }
+ 
++  // [pageId, action, arg]
++  void Page(const base::ListValue& args) {
++    AllowJavascript();
++    const std::string* id = Str(args, 0);
++    const std::string* action = Str(args, 1);
++    if (!id || !action) {
++      return;
++    }
++    if (*action == "destroy") {
++      controller_->DestroyPage(*id);
++      return;
++    }
++    content::WebContents* page = controller_->GetPage(*id);
++    if (!page) {
++      return;
++    }
++    content::NavigationController& nav = page->GetController();
++    if (*action == "navigate") {
++      if (const std::string* url = Str(args, 2)) {
++        nav.LoadURLWithParams(
++            content::NavigationController::LoadURLParams(GURL(*url)));
++      }
++    } else if (*action == "back") {
++      if (nav.CanGoBack()) {
++        nav.GoBack();
++      }
++    } else if (*action == "forward") {
++      if (nav.CanGoForward()) {
++        nav.GoForward();
++      }
++    } else if (*action == "reload") {
++      nav.Reload(content::ReloadType::NORMAL, true);
++    } else if (*action == "stop") {
++      page->Stop();
++    } else if (*action == "goToIndex") {
++      if (args.size() > 2 && args[2].is_int()) {
++        const int i = args[2].GetInt();
++        if (i >= 0 && i < nav.GetEntryCount()) {
++          nav.GoToIndex(i);
++        }
++      }
++    } else if (*action == "zoom") {
++      if (args.size() > 2 && (args[2].is_double() || args[2].is_int())) {
++        content::HostZoomMap::GetForWebContents(page)->SetTemporaryZoomLevel(
++            page->GetPrimaryMainFrame()->GetGlobalId(),
++            blink::ZoomFactorToZoomLevel(args[2].GetDouble()));
++      }
++    } else if (*action == "focus") {
++      page->Focus();
++    } else {
++      VLOG(1) << "weft: unknown page action " << *action;
++    }
++  }
++
+   const raw_ptr<WeftUI> controller_;
+ };
+ 
++namespace {
++
++// Watches one page for the shell: navigation state, title, favicon, loading,
++// crashes; and stands in as its delegate for what a page asks of its browser
++// (links that want a new tab, the hovered URL). The decisions are the
++// shell's: this only reports.
++class PageObserver : public content::WebContentsObserver,
++                     public content::WebContentsDelegate {
++ public:
++  PageObserver(WeftUI* ui, const std::string& id, content::WebContents* page)
++      : content::WebContentsObserver(page), ui_(ui), id_(id) {
++    page->SetDelegate(this);
++  }
++  ~PageObserver() override {
++    if (web_contents()) {
++      web_contents()->SetDelegate(nullptr);
++    }
++  }
++
++ private:
++  base::DictValue Event(const char* type) {
++    base::DictValue e;
++    e.Set("type", type);
++    e.Set("id", id_);
++    return e;
++  }
++
++  void Sync() {
++    content::WebContents* page = web_contents();
++    if (!page) {
++      return;
++    }
++    content::NavigationController& nav = page->GetController();
++    base::DictValue e = Event("page");
++    e.Set("url", page->GetVisibleURL().spec());
++    e.Set("title", base::UTF16ToUTF8(page->GetTitle()));
++    e.Set("loading", page->IsLoading());
++    e.Set("canBack", nav.CanGoBack());
++    e.Set("canFwd", nav.CanGoForward());
++    e.Set("favicon", favicon_);
++    base::ListValue history;
++    for (int i = 0; i < nav.GetEntryCount(); ++i) {
++      content::NavigationEntry* entry = nav.GetEntryAtIndex(i);
++      base::DictValue h;
++      h.Set("url", entry->GetURL().spec());
++      h.Set("title", base::UTF16ToUTF8(entry->GetTitleForDisplay()));
++      history.Append(std::move(h));
++    }
++    e.Set("history", std::move(history));
++    e.Set("histPos", nav.GetCurrentEntryIndex());
++    ui_->Emit(std::move(e));
++  }
++
++  // content::WebContentsObserver:
++  void DidFinishNavigation(content::NavigationHandle* handle) override {
++    if (handle->IsInPrimaryMainFrame() && handle->HasCommitted()) {
++      if (!handle->IsSameDocument()) {
++        favicon_.clear();
++      }
++      Sync();
++    }
++  }
++  void TitleWasSet(content::NavigationEntry* entry) override { Sync(); }
++  void DidStartLoading() override { Sync(); }
++  void DidStopLoading() override { Sync(); }
++  void NavigationEntriesDeleted() override { Sync(); }
++  void DidUpdateFaviconURL(
++      content::RenderFrameHost* rfh,
++      const std::vector<blink::mojom::FaviconURLPtr>& candidates,
++      blink::mojom::FaviconUpdateReason reason) override {
++    if (!rfh->IsInPrimaryMainFrame()) {
++      return;
++    }
++    favicon_ =
++        candidates.empty() ? std::string() : candidates[0]->icon_url.spec();
++    Sync();
++  }
++  void PrimaryMainFrameRenderProcessGone(
++      base::TerminationStatus status) override {
++    base::DictValue e = Event("crashed");
++    e.Set("status", static_cast<int>(status));
++    ui_->Emit(std::move(e));
++  }
++
++  // content::WebContentsDelegate:
++  content::WebContents* OpenURLFromTab(
++      content::WebContents* source,
++      const content::OpenURLParams& params,
++      base::OnceCallback<void(content::NavigationHandle&)> callback)
++      override {
++    if (params.disposition == WindowOpenDisposition::kCurrentTab) {
++      source->GetController().LoadURLWithParams(
++          content::NavigationController::LoadURLParams(params));
++      return source;
++    }
++    OpenLink(params.url, params.disposition);
++    return nullptr;
++  }
++  content::WebContents* AddNewContents(
++      content::WebContents* source,
++      std::unique_ptr<content::WebContents> new_contents,
++      const GURL& target_url,
++      WindowOpenDisposition disposition,
++      const blink::mojom::WindowFeatures& window_features,
++      bool user_gesture,
++      bool* was_blocked) override {
++    // window.open(): the shell decides where the link goes; the contents
++    // Chromium made for it are dropped and the URL opened afresh.
++    OpenLink(target_url, disposition);
++    return nullptr;
++  }
++  void UpdateTargetURL(content::WebContents* source,
++                       const GURL& url) override {
++    base::DictValue e = Event("hover");
++    e.Set("url", url.spec());
++    ui_->Emit(std::move(e));
++  }
++
++  void OpenLink(const GURL& url, WindowOpenDisposition disposition) {
++    if (!url.SchemeIsHTTPOrHTTPS()) {
++      return;
++    }
++    base::DictValue e = Event("openLink");
++    e.Set("url", url.spec());
++    e.Set("activate",
++          disposition == WindowOpenDisposition::kNewForegroundTab ||
++              disposition == WindowOpenDisposition::kNewWindow ||
++              disposition == WindowOpenDisposition::kNewPopup);
++    ui_->Emit(std::move(e));
++  }
++
++  const raw_ptr<WeftUI> ui_;
++  const std::string id_;
++  std::string favicon_;
++};
++
+ }  // namespace
+ 
++struct WeftUI::Page {
++  std::unique_ptr<content::WebContents> contents;
++  std::unique_ptr<PageObserver> observer;
++};
++
+ WeftUIConfig::WeftUIConfig()
+     : DefaultWebUIConfig(content::kChromeUIScheme, chrome::kChromeUIWeftHost) {}
+ 
+ WeftUI::WeftUI(content::WebUI* web_ui) : content::WebUIController(web_ui) {
+-  web_ui->AddMessageHandler(std::make_unique<WeftHandler>(this));
++  auto handler = std::make_unique<WeftHandler>(this);
++  handler_ = handler.get();
++  web_ui->AddMessageHandler(std::move(handler));
+ 
++  Profile* profile = Profile::FromWebUI(web_ui);
+   content::WebUIDataSource* source = content::WebUIDataSource::CreateAndAdd(
+-      web_ui->GetWebContents()->GetBrowserContext(), chrome::kChromeUIWeftHost);
++      profile, chrome::kChromeUIWeftHost);
+   webui::SetupWebUIDataSource(source, kWeftResources, IDR_WEFT_INDEX_HTML);
++  content::URLDataSource::Add(profile,
++                              std::make_unique<SanitizedImageSource>(profile));
+   // React builds the DOM through the DOM API, not HTML strings; Trusted Types
+   // would only block the bundler's module loader.
+   source->DisableTrustedTypesCSP();
+   source->OverrideContentSecurityPolicy(
+       network::mojom::CSPDirectiveName::StyleSrc,
+       "style-src 'self' 'unsafe-inline';");
+-  // Tab favicons are the sites' own URLs.
++  // Tab favicons come through chrome://image: a WebUI document cannot fetch
++  // the web itself (the WebUI loader kills a renderer that asks for https).
+   source->OverrideContentSecurityPolicy(
+       network::mojom::CSPDirectiveName::ImgSrc,
+-      "img-src 'self' data: blob: https: http:;");
++      "img-src 'self' chrome://image data: blob:;");
+   // The surface-embed <embed> that paints a page inside the shell; it has no
+   // src, so 'self' is the tightest policy that admits it.
+   source->OverrideContentSecurityPolicy(
+       network::mojom::CSPDirectiveName::ObjectSrc, "object-src 'self';");
+ }
+ 
+-WeftUI::~WeftUI() = default;
+-
+-content::WebContents* WeftUI::OpenPage() {
+-  content::WebContents::CreateParams params(
+-      web_ui()->GetWebContents()->GetBrowserContext());
+-  pages_.push_back(content::WebContents::Create(params));
+-  content::WebContents* page = pages_.back().get();
+-  // Nothing native holds a page: the shell's embed element sizes it once
+-  // attached, and visibility never propagates from a view. Seed both from the
+-  // shell's own contents, as WebUIBrowserWindow::OnActiveTabChanged does, or
+-  // the page lays out in a zero viewport and never produces a frame.
++WeftUI::~WeftUI() {
++  // Observers first: they are the pages' delegates.
++  for (auto& [id, page] : pages_) {
++    page->observer.reset();
++  }
++  handler_ = nullptr;
++}
++
++content::WebContents* WeftUI::CreatePage(const std::string& id) {
++  DestroyPage(id);
+   content::WebContents* shell = web_ui()->GetWebContents();
++  content::WebContents::CreateParams params(shell->GetBrowserContext());
++  auto page = std::make_unique<Page>();
++  page->contents = content::WebContents::Create(params);
++  content::WebContents* contents = page->contents.get();
++  page->observer = std::make_unique<PageObserver>(this, id, contents);
++  // Seeded as WebUIBrowserWindow::OnActiveTabChanged does, or the page lays
++  // out in a zero viewport and never produces a frame.
+   const gfx::Size seed = shell->GetContainerBounds().size();
+   if (!seed.IsEmpty()) {
+-    page->Resize(gfx::Rect(seed));
++    contents->Resize(gfx::Rect(seed));
++  }
++  contents->UpdateWebContentsVisibility(shell->GetVisibility());
++  pages_[id] = std::move(page);
++  return contents;
++}
++
++content::WebContents* WeftUI::GetPage(const std::string& id) {
++  auto it = pages_.find(id);
++  return it == pages_.end() ? nullptr : it->second->contents.get();
++}
++
++void WeftUI::DestroyPage(const std::string& id) {
++  auto it = pages_.find(id);
++  if (it == pages_.end()) {
++    return;
++  }
++  it->second->observer.reset();
++  pages_.erase(it);
++}
++
++void WeftUI::Emit(base::DictValue event) {
++  if (handler_) {
++    handler_->Emit(event);
+   }
+-  page->UpdateWebContentsVisibility(shell->GetVisibility());
+-  return page;
+ }
+ 
+ WEB_UI_CONTROLLER_TYPE_IMPL(WeftUI)
+diff --git a/chrome/browser/ui/webui/weft/weft_ui.h b/chrome/browser/ui/webui/weft/weft_ui.h
+index f15714b979..fb46f7f37d 100644
+--- a/chrome/browser/ui/webui/weft/weft_ui.h
++++ b/chrome/browser/ui/webui/weft/weft_ui.h
+@@ -5,9 +5,12 @@
+ #ifndef CHROME_BROWSER_UI_WEBUI_WEFT_WEFT_UI_H_
+ #define CHROME_BROWSER_UI_WEBUI_WEFT_WEFT_UI_H_
+ 
++#include <map>
+ #include <memory>
+-#include <vector>
++#include <string>
+ 
++#include "base/memory/raw_ptr.h"
++#include "base/values.h"
+ #include "content/public/browser/web_ui_controller.h"
+ #include "content/public/browser/webui_config.h"
+ 
+@@ -17,6 +20,7 @@ class WebContents;
+ 
+ namespace weft {
+ 
++class WeftHandler;
+ class WeftUI;
+ 
+ class WeftUIConfig : public content::DefaultWebUIConfig<WeftUI> {
+@@ -26,14 +30,15 @@ class WeftUIConfig : public content::DefaultWebUIConfig<WeftUI> {
+ 
+ // chrome://weft: the Weft shell. The page is the React app from
+ // weft-browser-app/src/renderer, bundled by scripts/build-shell.sh and reused
+-// unchanged; it talks to this controller through the WeftApi protocol
+-// (weft-browser-app/src/shared/ipc.ts) over chrome.send.
++// unchanged, plus a controller (shell/controller.ts in the fork repo) that
++// owns the browser model, as browser.ts does in Electron.
+ //
+-// Pages (the tabs' WebContents) are owned here and painted inside the shell
+-// through //components/surface_embed, the mechanism Chromium's own WebUI
+-// browser frame uses: the shell renders an
++// This side is the engine: pages (the tabs' WebContents) are created, driven
++// and observed here, and painted inside the shell through
++// //components/surface_embed, the mechanism Chromium's own WebUI browser
++// frame uses. The shell renders an
+ // <embed type="application/x-chromium-surface-embed" data-content-id=...>
+-// where the page goes.
++// where each page goes.
+ class WeftUI : public content::WebUIController {
+  public:
+   explicit WeftUI(content::WebUI* web_ui);
+@@ -43,14 +48,23 @@ class WeftUI : public content::WebUIController {
+ 
+   ~WeftUI() override;
+ 
+-  // Creates a page in this WebUI's browser context and returns it; the
+-  // controller keeps ownership for its own lifetime.
+-  content::WebContents* OpenPage();
++  // A page with the shell's id for it, in this WebUI's browser context; the
++  // controller keeps ownership. Seeded with the shell's size and visibility:
++  // nothing native holds a page, so neither would arrive on its own.
++  content::WebContents* CreatePage(const std::string& id);
++  content::WebContents* GetPage(const std::string& id);
++  void DestroyPage(const std::string& id);
++
++  // An event for the shell (window.__weft.event); dropped before the shell has
++  // asked for anything.
++  void Emit(base::DictValue event);
+ 
+  private:
++  struct Page;
+   WEB_UI_CONTROLLER_TYPE_DECL();
+ 
+-  std::vector<std::unique_ptr<content::WebContents>> pages_;
++  raw_ptr<WeftHandler> handler_ = nullptr;
++  std::map<std::string, std::unique_ptr<Page>> pages_;
+ };
+ 
+ }  // namespace weft

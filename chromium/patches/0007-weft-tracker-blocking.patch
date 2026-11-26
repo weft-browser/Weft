@@ -1,0 +1,595 @@
+diff --git a/chrome/browser/BUILD.gn b/chrome/browser/BUILD.gn
+index 22d84b97e4..b8bb345972 100644
+--- a/chrome/browser/BUILD.gn
++++ b/chrome/browser/BUILD.gn
+@@ -599,6 +599,7 @@ if (!is_android) {
+       "//chrome/browser/ui/webui/webui_toolbar",
+       "//chrome/browser/ui/webui/weft",
+       "//chrome/browser/ui/webui_browser",
++      "//chrome/browser/weft",
+       "//chrome/browser/ui/webui_browser:headers",
+       "//chrome/common:chrome_features",
+       "//components/autofill/core/browser/ml_model/logging:mojo_bindings",
+diff --git a/chrome/browser/chrome_content_browser_client.cc b/chrome/browser/chrome_content_browser_client.cc
+index 565bd580ba..447d011691 100644
+--- a/chrome/browser/chrome_content_browser_client.cc
++++ b/chrome/browser/chrome_content_browser_client.cc
+@@ -220,6 +220,7 @@
+ #include "chrome/browser/ui/webui/chrome_web_ui_controller_factory.h"
+ #include "chrome/browser/ui/webui/internal_debug_pages_disabled/internal_debug_pages_disabled_ui.h"
+ #include "chrome/browser/ui/webui/log_web_ui_url.h"
++#include "chrome/browser/weft/tracker_throttle.h"
+ #include "chrome/browser/universal_web_contents_observers.h"
+ #include "chrome/browser/usb/chrome_usb_delegate.h"
+ #include "chrome/browser/vr/vr_tab_helper.h"
+@@ -6232,6 +6233,10 @@ ChromeContentBrowserClient::CreateURLLoaderThrottles(
+   Profile* profile = Profile::FromBrowserContext(browser_context);
+   DCHECK(profile);
+ 
++  if (auto weft_throttle = weft::TrackerThrottle::MaybeCreate(request, wc_getter)) {
++    result.push_back(std::move(weft_throttle));
++  }
++
+   ChromeNavigationUIData* chrome_navigation_ui_data =
+       static_cast<ChromeNavigationUIData*>(navigation_ui_data);
+ 
+@@ -6992,6 +6997,7 @@ void ChromeContentBrowserClient::WillCreateURLLoaderFactory(
+         MaybeProxyRequest(browser_context, isolation_info, factory_builder);
+     glic::GlicSubresourceProxyingURLLoaderFactory::MaybeProxyRequest(
+         frame, factory_builder);
++    weft::TrackerFactory::MaybeProxyRequest(frame, factory_builder);
+   }
+ 
+ #if BUILDFLAG(ENTERPRISE_CLOUD_CONTENT_ANALYSIS)
+diff --git a/chrome/browser/ui/webui/weft/BUILD.gn b/chrome/browser/ui/webui/weft/BUILD.gn
+index ae70b730dc..c33e70d081 100644
+--- a/chrome/browser/ui/webui/weft/BUILD.gn
++++ b/chrome/browser/ui/webui/weft/BUILD.gn
+@@ -21,6 +21,7 @@ source_set("weft") {
+     "//components/proxy_config",
+     "//chrome/browser/resources/weft:resources",
+     "//chrome/browser/ui/webui/sanitized_image:sanitized_image_source",
++    "//chrome/browser/weft",
+     "//chrome/common",
+     "//components/guest_contents/browser",
+     "//components/surface_embed/browser",
+diff --git a/chrome/browser/ui/webui/weft/weft_ui.cc b/chrome/browser/ui/webui/weft/weft_ui.cc
+index adc3b6dccb..a491adabe2 100644
+--- a/chrome/browser/ui/webui/weft/weft_ui.cc
++++ b/chrome/browser/ui/webui/weft/weft_ui.cc
+@@ -28,6 +28,7 @@
+ #include "chrome/browser/profiles/profile.h"
+ #include "chrome/browser/profiles/profile_manager.h"
+ #include "chrome/browser/ui/webui/sanitized_image/sanitized_image_source.h"
++#include "chrome/browser/weft/tracker_throttle.h"
+ #include "chrome/common/webui_url_constants.h"
+ #include "chrome/grit/weft_resources.h"
+ #include "chrome/grit/weft_resources_map.h"
+@@ -78,6 +79,16 @@ namespace weft {
+ 
+ namespace {
+ 
++std::set<std::string> StringSet(const base::ListValue& list) {
++  std::set<std::string> out;
++  for (const base::Value& v : list) {
++    if (const std::string* s = v.GetIfString()) {
++      out.insert(*s);
++    }
++  }
++  return out;
++}
++
+ // Weft's files: a relative name of plain path components under DataDir().
+ std::optional<base::FilePath> DataPath(const std::string& name) {
+   if (name.empty() || name.front() == '/') {
+@@ -148,6 +159,12 @@ class WeftHandler : public content::WebUIMessageHandler {
+     web_ui()->RegisterMessageCallback(
+         "clearSite", base::BindRepeating(&WeftHandler::ClearSite,
+                                          base::Unretained(this)));
++    web_ui()->RegisterMessageCallback(
++        "setTrackers", base::BindRepeating(&WeftHandler::SetTrackers,
++                                           base::Unretained(this)));
++    web_ui()->RegisterMessageCallback(
++        "setAllow", base::BindRepeating(&WeftHandler::SetAllow,
++                                        base::Unretained(this)));
+     web_ui()->RegisterMessageCallback(
+         "setLeader", base::BindRepeating(&WeftHandler::SetLeader,
+                                          base::Unretained(this)));
+@@ -185,6 +202,22 @@ class WeftHandler : public content::WebUIMessageHandler {
+     CallJavascriptFunction("__weft.resolve", args[0], reply);
+   }
+ 
++  // [hosts]: the tracker list (the app's trackers.ts), process-wide.
++  void SetTrackers(const base::ListValue& args) {
++    AllowJavascript();
++    if (args.size() > 0 && args[0].is_list()) {
++      TrackerThrottle::SetTrackers(StringSet(args[0].GetList()));
++    }
++  }
++
++  // [keys]: "<wsId>|<host>" pairs where tracker blocking is off.
++  void SetAllow(const base::ListValue& args) {
++    AllowJavascript();
++    if (args.size() > 0 && args[0].is_list()) {
++      TrackerThrottle::SetAllow(StringSet(args[0].GetList()));
++    }
++  }
++
+   // [on]
+   void SetLeader(const base::ListValue& args) {
+     AllowJavascript();
+@@ -485,13 +518,16 @@ class PageObserver : public content::WebContentsObserver,
+     return e;
+   }
+ 
+-  void Sync() {
++  // `navigated`: a new document just committed (the shell resets per-document
++  // counters, as on Electron's did-start-navigation).
++  void Sync(bool navigated = false) {
+     content::WebContents* page = web_contents();
+     if (!page) {
+       return;
+     }
+     content::NavigationController& nav = page->GetController();
+     base::DictValue e = Event("page");
++    e.Set("navigated", navigated);
+     e.Set("url", page->GetVisibleURL().spec());
+     e.Set("title", base::UTF16ToUTF8(page->GetTitle()));
+     e.Set("loading", page->IsLoading());
+@@ -517,7 +553,7 @@ class PageObserver : public content::WebContentsObserver,
+       if (!handle->IsSameDocument()) {
+         favicon_.clear();
+       }
+-      Sync();
++      Sync(/*navigated=*/!handle->IsSameDocument());
+     }
+   }
+   void TitleWasSet(content::NavigationEntry* entry) override { Sync(); }
+@@ -955,10 +991,21 @@ content::WebContents* WeftUI::CreatePage(const std::string& id,
+     page->observer->Emulate(tz ? *tz : std::string(),
+                             locale ? *locale : std::string());
+   }
++  RegisterPage(contents,
++               PageRef{id, ws_id,
++                       base::BindRepeating(&WeftUI::OnBlocked,
++                                           weak_factory_.GetWeakPtr(), id)});
+   pages_[id] = std::move(page);
+   return contents;
+ }
+ 
++void WeftUI::OnBlocked(const std::string& page_id) {
++  base::DictValue e;
++  e.Set("type", "blocked");
++  e.Set("id", page_id);
++  Emit(std::move(e));
++}
++
+ content::WebContents* WeftUI::GetPage(const std::string& id) {
+   auto it = pages_.find(id);
+   return it == pages_.end() ? nullptr : it->second->contents.get();
+@@ -971,6 +1018,7 @@ void WeftUI::DestroyPage(const std::string& id) {
+   }
+   std::unique_ptr<Page> page = std::move(it->second);
+   pages_.erase(it);
++  UnregisterPage(page->contents.get());
+   page->observer.reset();
+   page->contents.reset();
+   if (page->private_profile) {
+diff --git a/chrome/browser/ui/webui/weft/weft_ui.h b/chrome/browser/ui/webui/weft/weft_ui.h
+index 6f7ebec878..1c9491f3aa 100644
+--- a/chrome/browser/ui/webui/weft/weft_ui.h
++++ b/chrome/browser/ui/webui/weft/weft_ui.h
+@@ -89,6 +89,9 @@ class WeftUI : public content::WebUIController {
+   content::WebContents* GetPage(const std::string& id);
+   void DestroyPage(const std::string& id);
+ 
++  // A request from the page was blocked as a tracker: the shell counts it.
++  void OnBlocked(const std::string& page_id);
++
+   // A key pressed inside a page. The prefix key and what follows it are the
+   // shell's: this mirrors the shell's leader state so the decision to swallow
+   // the key can be made here, now, and reports the key to the shell. Returns
+diff --git a/chrome/browser/weft/BUILD.gn b/chrome/browser/weft/BUILD.gn
+new file mode 100644
+index 0000000000..17240023b6
+--- /dev/null
++++ b/chrome/browser/weft/BUILD.gn
+@@ -0,0 +1,21 @@
++# Copyright 2026 Walnut Labs LLC
++# Use of this source code is governed by a BSD-style license that can be
++# found in the LICENSE file.
++
++# Weft's browser-process pieces that are not the chrome://weft WebUI itself.
++source_set("weft") {
++  sources = [
++    "tracker_throttle.cc",
++    "tracker_throttle.h",
++  ]
++  deps = [
++    "//base",
++    "//content/public/browser",
++    "//mojo/public/cpp/bindings",
++    "//net",
++    "//services/network/public/cpp",
++    "//services/network/public/mojom",
++    "//third_party/blink/public/common",
++    "//url",
++  ]
++}
+diff --git a/chrome/browser/weft/tracker_throttle.cc b/chrome/browser/weft/tracker_throttle.cc
+new file mode 100644
+index 0000000000..b7f48dc900
+--- /dev/null
++++ b/chrome/browser/weft/tracker_throttle.cc
+@@ -0,0 +1,226 @@
++// Copyright 2026 Walnut Labs LLC
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/weft/tracker_throttle.h"
++
++#include <utility>
++#include <vector>
++
++#include <map>
++
++#include "base/memory/ptr_util.h"
++#include "base/no_destructor.h"
++#include "base/strings/string_split.h"
++#include "base/strings/string_util.h"
++#include "content/public/browser/render_frame_host.h"
++#include "content/public/browser/web_contents.h"
++#include "net/base/net_errors.h"
++#include "net/url_request/redirect_info.h"
++#include "services/network/public/cpp/resource_request.h"
++#include "services/network/public/cpp/url_loader_completion_status.h"
++#include "services/network/public/mojom/url_loader.mojom.h"
++#include "url/gurl.h"
++
++namespace weft {
++
++namespace {
++
++std::set<std::string>& Trackers() {
++  static base::NoDestructor<std::set<std::string>> hosts;
++  return *hosts;
++}
++
++std::set<std::string>& Allow() {
++  static base::NoDestructor<std::set<std::string>> keys;
++  return *keys;
++}
++
++std::map<content::WebContents*, PageRef>& Pages() {
++  static base::NoDestructor<std::map<content::WebContents*, PageRef>> pages;
++  return *pages;
++}
++
++}  // namespace
++
++void RegisterPage(content::WebContents* contents, PageRef ref) {
++  Pages()[contents] = std::move(ref);
++}
++
++void UnregisterPage(content::WebContents* contents) {
++  Pages().erase(contents);
++}
++
++const PageRef* PageOf(content::WebContents* contents) {
++  auto it = Pages().find(contents);
++  return it == Pages().end() ? nullptr : &it->second;
++}
++
++// static
++void TrackerThrottle::SetTrackers(std::set<std::string> hosts) {
++  Trackers() = std::move(hosts);
++}
++
++// static
++void TrackerThrottle::SetAllow(std::set<std::string> keys) {
++  Allow() = std::move(keys);
++}
++
++// static
++bool TrackerThrottle::IsTracker(const std::string& host) {
++  const std::vector<std::string> parts = base::SplitString(
++      base::ToLowerASCII(host), ".", base::KEEP_WHITESPACE,
++      base::SPLIT_WANT_ALL);
++  for (size_t i = 0; i + 1 < parts.size(); ++i) {
++    if (Trackers().count(base::JoinString(
++            std::vector<std::string>(parts.begin() + i, parts.end()), "."))) {
++      return true;
++    }
++  }
++  return false;
++}
++
++// static
++std::string TrackerThrottle::SiteOf(const std::string& host) {
++  static const base::NoDestructor<std::set<std::string>> kSecondLevel(
++      {"co", "com", "org", "net", "gov", "ac", "edu"});
++  const std::vector<std::string> parts = base::SplitString(
++      base::ToLowerASCII(host), ".", base::KEEP_WHITESPACE,
++      base::SPLIT_WANT_ALL);
++  if (parts.size() <= 2) {
++    return base::JoinString(parts, ".");
++  }
++  const size_t n = kSecondLevel->count(parts[parts.size() - 2]) &&
++                           parts.back().size() == 2
++                       ? 3
++                       : 2;
++  return base::JoinString(
++      std::vector<std::string>(parts.end() - n, parts.end()), ".");
++}
++
++// static
++bool TrackerThrottle::IsThirdParty(const std::string& request_host,
++                                   const std::string& top_host) {
++  return !top_host.empty() && SiteOf(request_host) != SiteOf(top_host);
++}
++
++// static
++std::unique_ptr<blink::URLLoaderThrottle> TrackerThrottle::MaybeCreate(
++    const network::ResourceRequest& request,
++    const base::RepeatingCallback<content::WebContents*()>& wc_getter) {
++  if (request.is_outermost_main_frame || !wc_getter ||
++      !request.url.SchemeIsHTTPOrHTTPS()) {
++    return nullptr;
++  }
++  content::WebContents* contents = wc_getter.Run();
++  if (!contents || !PageOf(contents)) {
++    return nullptr;
++  }
++  return base::WrapUnique(new TrackerThrottle(wc_getter));
++}
++
++TrackerThrottle::TrackerThrottle(
++    base::RepeatingCallback<content::WebContents*()> wc_getter)
++    : wc_getter_(std::move(wc_getter)) {}
++
++TrackerThrottle::~TrackerThrottle() = default;
++
++// static
++bool TrackerThrottle::ShouldBlock(content::WebContents* contents,
++                                  const GURL& url) {
++  const PageRef* page = contents ? PageOf(contents) : nullptr;
++  if (!page || !url.SchemeIsHTTPOrHTTPS()) {
++    return false;
++  }
++  const GURL& top_url = contents->GetLastCommittedURL();
++  const std::string top(top_url.host());
++  const std::string host(url.host());
++  // The shell's allow keys are "<wsId>|<host>" with the port when there is
++  // one (hostOf() in model.ts).
++  const std::string top_key =
++      top + (top_url.has_port() ? ":" + std::string(top_url.port()) : "");
++  if (!IsThirdParty(host, top) || !IsTracker(host) ||
++      Allow().count(page->ws_id + "|" + top_key)) {
++    return false;
++  }
++  page->on_blocked.Run();
++  return true;
++}
++
++bool TrackerThrottle::MaybeBlock(const GURL& url) {
++  if (!ShouldBlock(wc_getter_.Run(), url)) {
++    return false;
++  }
++  delegate_->CancelWithError(net::ERR_BLOCKED_BY_CLIENT, "weft tracker");
++  return true;
++}
++
++void TrackerThrottle::WillStartRequest(network::ResourceRequest* request,
++                                       bool* defer) {
++  MaybeBlock(request->url);
++}
++
++void TrackerThrottle::WillRedirectRequest(
++    net::RedirectInfo* redirect_info,
++    const network::mojom::URLResponseHead& response_head,
++    bool* defer,
++    network::HttpRequestHeadersUpdateParams* headers_update_params) {
++  MaybeBlock(redirect_info->new_url);
++}
++
++const char* TrackerThrottle::NameForLoggingWillStartRequest() {
++  return "WeftTrackerThrottle";
++}
++
++TrackerFactory::TrackerFactory(
++    mojo::PendingReceiver<network::mojom::URLLoaderFactory> loader_receiver,
++    mojo::PendingRemote<network::mojom::URLLoaderFactory> target_factory,
++    base::WeakPtr<content::WebContents> contents,
++    base::SelfDeletingPassKey pass_key)
++    : network::SelfDeletingURLLoaderFactory(std::move(loader_receiver),
++                                            pass_key),
++      contents_(std::move(contents)) {
++  target_factory_.Bind(std::move(target_factory));
++  target_factory_.set_disconnect_handler(base::BindOnce(
++      &TrackerFactory::OnTargetFactoryError, base::Unretained(this)));
++}
++
++TrackerFactory::~TrackerFactory() = default;
++
++// static
++void TrackerFactory::MaybeProxyRequest(
++    content::RenderFrameHost* frame,
++    network::URLLoaderFactoryBuilder& builder) {
++  content::WebContents* contents =
++      frame ? content::WebContents::FromRenderFrameHost(frame) : nullptr;
++  if (!contents || !PageOf(contents)) {
++    return;
++  }
++  auto [receiver, remote] = builder.Append();
++  base::MakeSelfDeleting<TrackerFactory>(std::move(receiver), std::move(remote),
++                                         contents->GetWeakPtr());
++}
++
++void TrackerFactory::CreateLoaderAndStart(
++    mojo::PendingReceiver<network::mojom::URLLoader> loader_receiver,
++    int32_t request_id,
++    uint32_t options,
++    const network::ResourceRequest& request,
++    mojo::PendingRemote<network::mojom::URLLoaderClient> client,
++    const net::MutableNetworkTrafficAnnotationTag& traffic_annotation) {
++  if (TrackerThrottle::ShouldBlock(contents_.get(), request.url)) {
++    mojo::Remote<network::mojom::URLLoaderClient>(std::move(client))
++        ->OnComplete(
++            network::URLLoaderCompletionStatus(net::ERR_BLOCKED_BY_CLIENT));
++    return;
++  }
++  target_factory_->CreateLoaderAndStart(std::move(loader_receiver), request_id,
++                                        options, request, std::move(client),
++                                        traffic_annotation);
++}
++
++void TrackerFactory::OnTargetFactoryError() {
++  DisconnectReceiversAndDestroy();
++}
++
++}  // namespace weft
+diff --git a/chrome/browser/weft/tracker_throttle.h b/chrome/browser/weft/tracker_throttle.h
+new file mode 100644
+index 0000000000..f89cba4aa6
+--- /dev/null
++++ b/chrome/browser/weft/tracker_throttle.h
+@@ -0,0 +1,139 @@
++// Copyright 2026 Walnut Labs LLC
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_WEFT_TRACKER_THROTTLE_H_
++#define CHROME_BROWSER_WEFT_TRACKER_THROTTLE_H_
++
++#include <memory>
++#include <set>
++#include <string>
++
++#include "base/functional/callback.h"
++#include "base/memory/weak_ptr.h"
++#include "base/types/pass_key.h"
++#include "content/public/browser/frame_tree_node_id.h"
++#include "mojo/public/cpp/bindings/pending_receiver.h"
++#include "mojo/public/cpp/bindings/pending_remote.h"
++#include "mojo/public/cpp/bindings/remote.h"
++#include "services/network/public/cpp/self_deleting_url_loader_factory.h"
++#include "services/network/public/cpp/url_loader_factory_builder.h"
++#include "third_party/blink/public/common/loader/url_loader_throttle.h"
++
++class GURL;
++
++namespace content {
++class RenderFrameHost;
++class WebContents;
++}  // namespace content
++
++namespace network {
++struct ResourceRequest;
++}  // namespace network
++
++namespace weft {
++
++// The page a WebContents is, for the parts of the browser that meet pages
++// without going through the shell. Registered by WeftUI for each page.
++struct PageRef {
++  std::string id;
++  std::string ws_id;
++  base::RepeatingClosure on_blocked;
++};
++void RegisterPage(content::WebContents* contents, PageRef ref);
++void UnregisterPage(content::WebContents* contents);
++const PageRef* PageOf(content::WebContents* contents);
++
++// Weft's tracker blocking, the fork's half of weft-browser-app's
++// src/main/sessions.ts onBeforeRequest hook: a third-party request from a
++// page to a host on the tracker list is cancelled, unless the site has
++// tracker blocking switched off in that workspace. The list and the allow
++// set come from the shell (weft_ui.cc, setTrackers / setAllow). Two
++// entry points, because Chromium decides requests in two places: this
++// throttle sees navigations (frames), TrackerFactory below sees a document's
++// subresources.
++class TrackerThrottle : public blink::URLLoaderThrottle {
++ public:
++  // The shell's lists, process-wide.
++  static void SetTrackers(std::set<std::string> hosts);
++  static void SetAllow(std::set<std::string> keys);  // "<wsId>|<topHost>"
++
++  // Whether a request to `url` from the page `contents` is a blocked
++  // tracker; counts it for the shell when it is.
++  static bool ShouldBlock(content::WebContents* contents, const GURL& url);
++
++  // The app's rules (trackers.ts): a host is a tracker when it or a parent
++  // domain is on the list; two hosts are the same site when their rough
++  // registrable domains agree.
++  static bool IsTracker(const std::string& host);
++  static std::string SiteOf(const std::string& host);
++  static bool IsThirdParty(const std::string& request_host,
++                           const std::string& top_host);
++
++  // A throttle for `request` when it comes from a Weft page; null otherwise.
++  static std::unique_ptr<blink::URLLoaderThrottle> MaybeCreate(
++      const network::ResourceRequest& request,
++      const base::RepeatingCallback<content::WebContents*()>& wc_getter);
++
++  TrackerThrottle(const TrackerThrottle&) = delete;
++  TrackerThrottle& operator=(const TrackerThrottle&) = delete;
++  ~TrackerThrottle() override;
++
++  // blink::URLLoaderThrottle:
++  void WillStartRequest(network::ResourceRequest* request,
++                        bool* defer) override;
++  void WillRedirectRequest(
++      net::RedirectInfo* redirect_info,
++      const network::mojom::URLResponseHead& response_head,
++      bool* defer,
++      network::HttpRequestHeadersUpdateParams* headers_update_params) override;
++  const char* NameForLoggingWillStartRequest() override;
++
++ private:
++  TrackerThrottle(base::RepeatingCallback<content::WebContents*()> wc_getter);
++
++  // Cancels a request to `url` when the rules say so; true when cancelled.
++  bool MaybeBlock(const GURL& url);
++
++  base::RepeatingCallback<content::WebContents*()> wc_getter_;
++};
++
++// The subresource half: a URLLoaderFactory in front of a Weft page's that
++// completes a blocked request with ERR_BLOCKED_BY_CLIENT and passes every
++// other one through. Modelled on GlicSubresourceProxyingURLLoaderFactory.
++class TrackerFactory : public network::SelfDeletingURLLoaderFactory {
++ public:
++  TrackerFactory(
++      mojo::PendingReceiver<network::mojom::URLLoaderFactory> loader_receiver,
++      mojo::PendingRemote<network::mojom::URLLoaderFactory> target_factory,
++      base::WeakPtr<content::WebContents> contents,
++      base::SelfDeletingPassKey pass_key);
++  TrackerFactory(const TrackerFactory&) = delete;
++  TrackerFactory& operator=(const TrackerFactory&) = delete;
++
++  // Puts a TrackerFactory in front of `frame`'s subresource factory when the
++  // frame is in a Weft page.
++  static void MaybeProxyRequest(content::RenderFrameHost* frame,
++                                network::URLLoaderFactoryBuilder& builder);
++
++  // network::mojom::URLLoaderFactory:
++  void CreateLoaderAndStart(
++      mojo::PendingReceiver<network::mojom::URLLoader> loader_receiver,
++      int32_t request_id,
++      uint32_t options,
++      const network::ResourceRequest& request,
++      mojo::PendingRemote<network::mojom::URLLoaderClient> client,
++      const net::MutableNetworkTrafficAnnotationTag& traffic_annotation)
++      override;
++
++ private:
++  ~TrackerFactory() override;
++  void OnTargetFactoryError();
++
++  mojo::Remote<network::mojom::URLLoaderFactory> target_factory_;
++  base::WeakPtr<content::WebContents> contents_;
++};
++
++}  // namespace weft
++
++#endif  // CHROME_BROWSER_WEFT_TRACKER_THROTTLE_H_

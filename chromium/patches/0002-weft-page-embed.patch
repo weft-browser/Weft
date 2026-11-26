@@ -1,0 +1,269 @@
+diff --git a/chrome/browser/BUILD.gn b/chrome/browser/BUILD.gn
+index f0f529901a..22d84b97e4 100644
+--- a/chrome/browser/BUILD.gn
++++ b/chrome/browser/BUILD.gn
+@@ -597,6 +597,7 @@ if (!is_android) {
+       "//chrome/browser/ui/webui/web_app_internals:mojo_bindings",
+       "//chrome/browser/ui/webui/webui_gallery",
+       "//chrome/browser/ui/webui/webui_toolbar",
++      "//chrome/browser/ui/webui/weft",
+       "//chrome/browser/ui/webui_browser",
+       "//chrome/browser/ui/webui_browser:headers",
+       "//chrome/common:chrome_features",
+diff --git a/chrome/browser/chrome_content_browser_client_receiver_bindings.cc b/chrome/browser/chrome_content_browser_client_receiver_bindings.cc
+index aa6ff52009..f0a2847ead 100644
+--- a/chrome/browser/chrome_content_browser_client_receiver_bindings.cc
++++ b/chrome/browser/chrome_content_browser_client_receiver_bindings.cc
+@@ -111,6 +111,7 @@
+ #include "chrome/browser/indigo/onboarding/indigo_onboarding_dialog.h"
+ #include "chrome/browser/password_manager/remote_actor/remote_actor_credential_sharing_impl.h"
+ #include "chrome/browser/record_replay/chrome_record_replay_client.h"
++#include "chrome/browser/ui/webui/weft/weft_ui.h"
+ #include "chrome/browser/ui/webui_browser/webui_browser_ui.h"
+ #include "chrome/common/indigo/indigo.mojom.h"
+ #include "chrome/common/password_manager/remote_actor_credential_sharing_policy.h"
+@@ -452,7 +453,8 @@ void ChromeContentBrowserClient::
+                    surface_embed::mojom::SurfaceEmbedHost> receiver) {
+               auto* web_ui = render_frame_host->GetWebUI();
+               if (!web_ui ||
+-                  !web_ui->GetController()->GetAs<WebUIBrowserUI>()) {
++                  (!web_ui->GetController()->GetAs<WebUIBrowserUI>() &&
++                   !web_ui->GetController()->GetAs<weft::WeftUI>())) {
+                 return;
+               }
+               surface_embed::SurfaceEmbedHost::Create(render_frame_host,
+diff --git a/chrome/browser/ui/webui/weft/BUILD.gn b/chrome/browser/ui/webui/weft/BUILD.gn
+index ee79328dbc..2d5ce6001f 100644
+--- a/chrome/browser/ui/webui/weft/BUILD.gn
++++ b/chrome/browser/ui/webui/weft/BUILD.gn
+@@ -11,9 +11,14 @@ source_set("weft") {
+   deps = [
+     "//base",
+     "//chrome/browser/resources/weft:resources",
++    "//chrome/common",
++    "//components/guest_contents/browser",
++    "//components/surface_embed/browser",
+     "//components/version_info",
+     "//content/public/common",
+     "//services/network/public/mojom",
++    "//ui/gfx/geometry",
+     "//ui/webui",
++    "//url",
+   ]
+ }
+diff --git a/chrome/browser/ui/webui/weft/weft_ui.cc b/chrome/browser/ui/webui/weft/weft_ui.cc
+index 45491ced43..a47d34b6b1 100644
+--- a/chrome/browser/ui/webui/weft/weft_ui.cc
++++ b/chrome/browser/ui/webui/weft/weft_ui.cc
+@@ -11,17 +11,24 @@
+ #include "base/functional/bind.h"
+ #include "base/json/json_reader.h"
+ #include "base/logging.h"
++#include "base/memory/raw_ptr.h"
+ #include "base/values.h"
++#include "chrome/common/webui_url_constants.h"
+ #include "chrome/grit/weft_resources.h"
+ #include "chrome/grit/weft_resources_map.h"
++#include "components/surface_embed/browser/surface_embed_handle.h"
+ #include "components/version_info/version_info.h"
++#include "content/public/browser/navigation_controller.h"
+ #include "content/public/browser/web_contents.h"
+ #include "content/public/browser/web_ui.h"
+ #include "content/public/browser/web_ui_data_source.h"
+ #include "content/public/browser/web_ui_message_handler.h"
+ #include "content/public/common/url_constants.h"
+ #include "services/network/public/mojom/content_security_policy.mojom.h"
++#include "ui/gfx/geometry/rect.h"
++#include "ui/gfx/geometry/size.h"
+ #include "ui/webui/webui_util.h"
++#include "url/gurl.h"
+ 
+ namespace weft {
+ 
+@@ -49,11 +56,11 @@ constexpr char kStubState[] = R"json({
+   "update": {"phase": "off", "current": "", "version": "", "percent": 0, "detail": ""}
+ })json";
+ 
+-// The browser half of WeftApi. `getState` answers through window.__weft.resolve
+-// and events go through window.__weft.event (shell/bridge.ts in the fork repo).
++// The browser half of WeftApi. Replies go through window.__weft.resolve and
++// events through window.__weft.event (shell/bridge.ts in the fork repo).
+ class WeftHandler : public content::WebUIMessageHandler {
+  public:
+-  WeftHandler() = default;
++  explicit WeftHandler(WeftUI* controller) : controller_(controller) {}
+   WeftHandler(const WeftHandler&) = delete;
+   WeftHandler& operator=(const WeftHandler&) = delete;
+   ~WeftHandler() override = default;
+@@ -65,9 +72,13 @@ class WeftHandler : public content::WebUIMessageHandler {
+     web_ui()->RegisterMessageCallback(
+         "command", base::BindRepeating(&WeftHandler::Command,
+                                        base::Unretained(this)));
++    web_ui()->RegisterMessageCallback(
++        "openPage", base::BindRepeating(&WeftHandler::OpenPage,
++                                        base::Unretained(this)));
+   }
+ 
+  private:
++  // [requestId] -> resolve(requestId, BrowserState)
+   void GetState(const base::ListValue& args) {
+     AllowJavascript();
+     std::optional<base::Value> state =
+@@ -78,22 +89,41 @@ class WeftHandler : public content::WebUIMessageHandler {
+     CallJavascriptFunction("__weft.resolve", args[0], *state);
+   }
+ 
++  // [Command] (weft-browser-app/src/shared/ipc.ts)
+   void Command(const base::ListValue& args) {
+     AllowJavascript();
+     VLOG(1) << "weft command: " << args;
+   }
++
++  // [requestId, url] -> resolve(requestId, {contentId}): a page loading `url`,
++  // ready for a surface-embed element in the shell.
++  void OpenPage(const base::ListValue& args) {
++    AllowJavascript();
++    const std::string* url = args.size() > 1 ? args[1].GetIfString() : nullptr;
++    content::WebContents* page = controller_->OpenPage();
++    if (url) {
++      page->GetController().LoadURLWithParams(
++          content::NavigationController::LoadURLParams(GURL(*url)));
++    }
++    auto* handle = surface_embed::SurfaceEmbedHandle::CreateForWebContents(page);
++    base::DictValue reply;
++    reply.Set("contentId", handle->id().ToString());
++    CallJavascriptFunction("__weft.resolve", args[0], reply);
++  }
++
++  const raw_ptr<WeftUI> controller_;
+ };
+ 
+ }  // namespace
+ 
+ WeftUIConfig::WeftUIConfig()
+-    : DefaultWebUIConfig(content::kChromeUIScheme, kChromeUIWeftHost) {}
++    : DefaultWebUIConfig(content::kChromeUIScheme, chrome::kChromeUIWeftHost) {}
+ 
+ WeftUI::WeftUI(content::WebUI* web_ui) : content::WebUIController(web_ui) {
+-  web_ui->AddMessageHandler(std::make_unique<WeftHandler>());
++  web_ui->AddMessageHandler(std::make_unique<WeftHandler>(this));
+ 
+   content::WebUIDataSource* source = content::WebUIDataSource::CreateAndAdd(
+-      web_ui->GetWebContents()->GetBrowserContext(), kChromeUIWeftHost);
++      web_ui->GetWebContents()->GetBrowserContext(), chrome::kChromeUIWeftHost);
+   webui::SetupWebUIDataSource(source, kWeftResources, IDR_WEFT_INDEX_HTML);
+   // React builds the DOM through the DOM API, not HTML strings; Trusted Types
+   // would only block the bundler's module loader.
+@@ -105,8 +135,32 @@ WeftUI::WeftUI(content::WebUI* web_ui) : content::WebUIController(web_ui) {
+   source->OverrideContentSecurityPolicy(
+       network::mojom::CSPDirectiveName::ImgSrc,
+       "img-src 'self' data: blob: https: http:;");
++  // The surface-embed <embed> that paints a page inside the shell; it has no
++  // src, so 'self' is the tightest policy that admits it.
++  source->OverrideContentSecurityPolicy(
++      network::mojom::CSPDirectiveName::ObjectSrc, "object-src 'self';");
+ }
+ 
+ WeftUI::~WeftUI() = default;
+ 
++content::WebContents* WeftUI::OpenPage() {
++  content::WebContents::CreateParams params(
++      web_ui()->GetWebContents()->GetBrowserContext());
++  pages_.push_back(content::WebContents::Create(params));
++  content::WebContents* page = pages_.back().get();
++  // Nothing native holds a page: the shell's embed element sizes it once
++  // attached, and visibility never propagates from a view. Seed both from the
++  // shell's own contents, as WebUIBrowserWindow::OnActiveTabChanged does, or
++  // the page lays out in a zero viewport and never produces a frame.
++  content::WebContents* shell = web_ui()->GetWebContents();
++  const gfx::Size seed = shell->GetContainerBounds().size();
++  if (!seed.IsEmpty()) {
++    page->Resize(gfx::Rect(seed));
++  }
++  page->UpdateWebContentsVisibility(shell->GetVisibility());
++  return page;
++}
++
++WEB_UI_CONTROLLER_TYPE_IMPL(WeftUI)
++
+ }  // namespace weft
+diff --git a/chrome/browser/ui/webui/weft/weft_ui.h b/chrome/browser/ui/webui/weft/weft_ui.h
+index 718792d72d..f15714b979 100644
+--- a/chrome/browser/ui/webui/weft/weft_ui.h
++++ b/chrome/browser/ui/webui/weft/weft_ui.h
+@@ -5,12 +5,17 @@
+ #ifndef CHROME_BROWSER_UI_WEBUI_WEFT_WEFT_UI_H_
+ #define CHROME_BROWSER_UI_WEBUI_WEFT_WEFT_UI_H_
+ 
++#include <memory>
++#include <vector>
++
+ #include "content/public/browser/web_ui_controller.h"
+ #include "content/public/browser/webui_config.h"
+ 
+-namespace weft {
++namespace content {
++class WebContents;
++}  // namespace content
+ 
+-inline constexpr char kChromeUIWeftHost[] = "weft";
++namespace weft {
+ 
+ class WeftUI;
+ 
+@@ -23,6 +28,12 @@ class WeftUIConfig : public content::DefaultWebUIConfig<WeftUI> {
+ // weft-browser-app/src/renderer, bundled by scripts/build-shell.sh and reused
+ // unchanged; it talks to this controller through the WeftApi protocol
+ // (weft-browser-app/src/shared/ipc.ts) over chrome.send.
++//
++// Pages (the tabs' WebContents) are owned here and painted inside the shell
++// through //components/surface_embed, the mechanism Chromium's own WebUI
++// browser frame uses: the shell renders an
++// <embed type="application/x-chromium-surface-embed" data-content-id=...>
++// where the page goes.
+ class WeftUI : public content::WebUIController {
+  public:
+   explicit WeftUI(content::WebUI* web_ui);
+@@ -31,6 +42,15 @@ class WeftUI : public content::WebUIController {
+   WeftUI& operator=(const WeftUI&) = delete;
+ 
+   ~WeftUI() override;
++
++  // Creates a page in this WebUI's browser context and returns it; the
++  // controller keeps ownership for its own lifetime.
++  content::WebContents* OpenPage();
++
++ private:
++  WEB_UI_CONTROLLER_TYPE_DECL();
++
++  std::vector<std::unique_ptr<content::WebContents>> pages_;
+ };
+ 
+ }  // namespace weft
+diff --git a/chrome/common/webui_url_constants.h b/chrome/common/webui_url_constants.h
+index 889032faee..63cca2ea17 100644
+--- a/chrome/common/webui_url_constants.h
++++ b/chrome/common/webui_url_constants.h
+@@ -444,6 +444,8 @@ inline constexpr char kChromeUIUntrustedReadAnythingSidePanelURL[] =
+ inline constexpr char kChromeUIWebAppInternalsHost[] = "web-app-internals";
+ inline constexpr char kChromeUIWebuiBrowserHost[] = "webui-browser";
+ inline constexpr char kChromeUIWebuiBrowserURL[] = "chrome://webui-browser/";
++inline constexpr char kChromeUIWeftHost[] = "weft";
++inline constexpr char kChromeUIWeftURL[] = "chrome://weft/";
+ inline constexpr char kChromeUIWebUIJsErrorHost[] = "webuijserror";
+ inline constexpr char kChromeUIWebUIJsErrorURL[] = "chrome://webuijserror/";
+ #endif  // BUILDFLAG(IS_ANDROID)
+diff --git a/chrome/renderer/chrome_content_renderer_client.cc b/chrome/renderer/chrome_content_renderer_client.cc
+index 792412915d..721ed206e3 100644
+--- a/chrome/renderer/chrome_content_renderer_client.cc
++++ b/chrome/renderer/chrome_content_renderer_client.cc
+@@ -986,7 +986,8 @@ bool ChromeContentRendererClient::OverrideCreatePlugin(
+   if (base::FeatureList::IsEnabled(surface_embed::features::kSurfaceEmbed)) {
+     GURL url = render_frame->GetWebFrame()->GetDocument().Url();
+     if (url.SchemeIs(content::kChromeUIScheme) &&
+-        url.host() == chrome::kChromeUIWebuiBrowserHost) {
++        (url.host() == chrome::kChromeUIWebuiBrowserHost ||
++         url.host() == chrome::kChromeUIWeftHost)) {
+       if (surface_embed::MaybeCreatePlugin(render_frame, params, plugin)) {
+         return true;
+       }

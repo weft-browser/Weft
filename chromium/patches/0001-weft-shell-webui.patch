@@ -1,0 +1,305 @@
+diff --git a/chrome/browser/resources/BUILD.gn b/chrome/browser/resources/BUILD.gn
+index 058f702e8b..ed26bad874 100644
+--- a/chrome/browser/resources/BUILD.gn
++++ b/chrome/browser/resources/BUILD.gn
+@@ -61,6 +61,7 @@ group("resources") {
+     public_deps += [
+       ":app_icon_resources",
+       ":dev_ui_paks",
++      "weft:resources",
+       "about_sys:resources",
+       "access_code_cast:resources",
+       "actor_overlay:resources",
+diff --git a/chrome/browser/resources/weft/BUILD.gn b/chrome/browser/resources/weft/BUILD.gn
+new file mode 100644
+index 0000000000..f3ec52064a
+--- /dev/null
++++ b/chrome/browser/resources/weft/BUILD.gn
+@@ -0,0 +1,41 @@
++# Copyright 2026 Walnut Labs LLC
++# Use of this source code is governed by a BSD-style license that can be
++# found in the LICENSE file.
++
++import("//chrome/common/features.gni")
++import("//tools/grit/grit_rule.gni")
++import("//ui/webui/resources/tools/generate_grd.gni")
++
++# The Weft shell, prebuilt into dist/ by the fork repo's scripts/build-shell.sh
++# (apply.sh runs it) from weft-browser-app/src/renderer. Fixed file names, so
++# this list is static.
++weft_shell_files = [
++  "index.html",
++  "shell.js",
++  "style.css",
++]
++
++grit("resources") {
++  defines = chrome_grit_defines
++  enable_input_discovery_for_gn_analyze = false
++  source = "$target_gen_dir/resources.grd"
++  inputs = []
++  foreach(f, weft_shell_files) {
++    inputs += [ "dist/$f" ]
++  }
++  deps = [ ":build_grd" ]
++  outputs = [
++    "grit/weft_resources.h",
++    "grit/weft_resources_map.h",
++    "grit/weft_resources_map.cc",
++    "weft_resources.pak",
++  ]
++  output_dir = "$root_gen_dir/chrome"
++}
++
++generate_grd("build_grd") {
++  grd_prefix = "weft"
++  out_grd = "$target_gen_dir/resources.grd"
++  input_files = weft_shell_files
++  input_files_base_dir = rebase_path("dist", "//")
++}
+diff --git a/chrome/browser/ui/webui/BUILD.gn b/chrome/browser/ui/webui/BUILD.gn
+index 867d0cee38..2bbddde9a2 100644
+--- a/chrome/browser/ui/webui/BUILD.gn
++++ b/chrome/browser/ui/webui/BUILD.gn
+@@ -91,6 +91,7 @@ source_set("configs") {
+     "//chrome/browser/ui/webui/translate_internals",
+     "//chrome/browser/ui/webui/usb_internals",
+     "//chrome/browser/ui/webui/version",
++    "//chrome/browser/ui/webui/weft",
+     "//components/lens:buildflags",
+     "//components/notebooks/internals/webui",
+     "//components/webui/user_actions",
+diff --git a/chrome/browser/ui/webui/chrome_web_ui_configs.cc b/chrome/browser/ui/webui/chrome_web_ui_configs.cc
+index 105d9e9726..3d6206a6a8 100644
+--- a/chrome/browser/ui/webui/chrome_web_ui_configs.cc
++++ b/chrome/browser/ui/webui/chrome_web_ui_configs.cc
+@@ -59,6 +59,7 @@
+ #include "chrome/browser/ui/webui/translate_internals/translate_internals_ui.h"
+ #include "chrome/browser/ui/webui/usb_internals/usb_internals_ui.h"
+ #include "chrome/browser/ui/webui/version/version_ui.h"
++#include "chrome/browser/ui/webui/weft/weft_ui.h"
+ #include "components/enterprise/buildflags/buildflags.h"
+ #include "components/safe_browsing/buildflags.h"
+ #include "components/security_interstitials/content/connection_help_ui.h"
+@@ -334,6 +335,7 @@ void RegisterChromeWebUIConfigs() {
+   map.AddWebUIConfig(std::make_unique<UsbInternalsUIConfig>());
+   map.AddWebUIConfig(std::make_unique<user_actions_ui::UserActionsUIConfig>());
+   map.AddWebUIConfig(std::make_unique<VersionUIConfig>());
++  map.AddWebUIConfig(std::make_unique<weft::WeftUIConfig>());
+   map.AddWebUIConfig(std::make_unique<WebRtcLogsUIConfig>());
+   map.AddWebUIConfig(std::make_unique<RegionalCapabilitiesInternalsUIConfig>());
+ #if BUILDFLAG(ENABLE_WEBUI_NTP)
+diff --git a/chrome/browser/ui/webui/weft/BUILD.gn b/chrome/browser/ui/webui/weft/BUILD.gn
+new file mode 100644
+index 0000000000..ee79328dbc
+--- /dev/null
++++ b/chrome/browser/ui/webui/weft/BUILD.gn
+@@ -0,0 +1,19 @@
++# Copyright 2026 Walnut Labs LLC
++# Use of this source code is governed by a BSD-style license that can be
++# found in the LICENSE file.
++
++source_set("weft") {
++  sources = [
++    "weft_ui.cc",
++    "weft_ui.h",
++  ]
++  public_deps = [ "//content/public/browser" ]
++  deps = [
++    "//base",
++    "//chrome/browser/resources/weft:resources",
++    "//components/version_info",
++    "//content/public/common",
++    "//services/network/public/mojom",
++    "//ui/webui",
++  ]
++}
+diff --git a/chrome/browser/ui/webui/weft/weft_ui.cc b/chrome/browser/ui/webui/weft/weft_ui.cc
+new file mode 100644
+index 0000000000..45491ced43
+--- /dev/null
++++ b/chrome/browser/ui/webui/weft/weft_ui.cc
+@@ -0,0 +1,112 @@
++// Copyright 2026 Walnut Labs LLC
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/ui/webui/weft/weft_ui.h"
++
++#include <memory>
++#include <optional>
++#include <string>
++
++#include "base/functional/bind.h"
++#include "base/json/json_reader.h"
++#include "base/logging.h"
++#include "base/values.h"
++#include "chrome/grit/weft_resources.h"
++#include "chrome/grit/weft_resources_map.h"
++#include "components/version_info/version_info.h"
++#include "content/public/browser/web_contents.h"
++#include "content/public/browser/web_ui.h"
++#include "content/public/browser/web_ui_data_source.h"
++#include "content/public/browser/web_ui_message_handler.h"
++#include "content/public/common/url_constants.h"
++#include "services/network/public/mojom/content_security_policy.mojom.h"
++#include "ui/webui/webui_util.h"
++
++namespace weft {
++
++namespace {
++
++// The BrowserState the shell receives until the browser owns the model
++// (plan.md, Phase 2): one workspace with one empty tab, no VPN, no
++// extensions, updates off. Shape: weft-browser-app/src/shared/model.ts.
++constexpr char kStubState[] = R"json({
++  "workspaces": [{
++    "id": "ws-stub", "name": "Workspace 1", "color": "#6aa9ff", "icon": null,
++    "env": {"network": "direct", "region": "Seattle, US", "proxy": "", "locale": "en-US",
++            "tz": "America/Los_Angeles", "fp": "standard", "disposable": false, "ext": {}},
++    "tabs": [{
++      "id": "tab-stub", "url": "", "title": "New tab", "pinned": false, "group": null,
++      "icon": null, "favicon": null, "private": false, "blocked": 0, "loading": false,
++      "canBack": false, "canFwd": false, "history": [], "histPos": 0, "zoom": 1
++    }],
++    "groups": [], "active": 0
++  }],
++  "activeWs": 0, "closed": [], "leader": false, "pendingCloseWs": null, "extensions": [],
++  "vpnRegions": ["Seattle, US", "New York, US", "Zurich, CH", "Frankfurt, DE", "Milan, IT", "Singapore, SG"],
++  "vpnConfigured": [], "vpnStatus": {}, "vpnEngine": false, "vpnDir": "", "allow": {},
++  "renameGroup": null, "uiScale": 1, "dataDir": "",
++  "update": {"phase": "off", "current": "", "version": "", "percent": 0, "detail": ""}
++})json";
++
++// The browser half of WeftApi. `getState` answers through window.__weft.resolve
++// and events go through window.__weft.event (shell/bridge.ts in the fork repo).
++class WeftHandler : public content::WebUIMessageHandler {
++ public:
++  WeftHandler() = default;
++  WeftHandler(const WeftHandler&) = delete;
++  WeftHandler& operator=(const WeftHandler&) = delete;
++  ~WeftHandler() override = default;
++
++  void RegisterMessages() override {
++    web_ui()->RegisterMessageCallback(
++        "getState", base::BindRepeating(&WeftHandler::GetState,
++                                        base::Unretained(this)));
++    web_ui()->RegisterMessageCallback(
++        "command", base::BindRepeating(&WeftHandler::Command,
++                                       base::Unretained(this)));
++  }
++
++ private:
++  void GetState(const base::ListValue& args) {
++    AllowJavascript();
++    std::optional<base::Value> state =
++        base::JSONReader::Read(kStubState, base::JSON_PARSE_RFC);
++    CHECK(state && state->is_dict());
++    state->GetDict().SetByDottedPath(
++        "update.current", std::string(version_info::GetVersionNumber()));
++    CallJavascriptFunction("__weft.resolve", args[0], *state);
++  }
++
++  void Command(const base::ListValue& args) {
++    AllowJavascript();
++    VLOG(1) << "weft command: " << args;
++  }
++};
++
++}  // namespace
++
++WeftUIConfig::WeftUIConfig()
++    : DefaultWebUIConfig(content::kChromeUIScheme, kChromeUIWeftHost) {}
++
++WeftUI::WeftUI(content::WebUI* web_ui) : content::WebUIController(web_ui) {
++  web_ui->AddMessageHandler(std::make_unique<WeftHandler>());
++
++  content::WebUIDataSource* source = content::WebUIDataSource::CreateAndAdd(
++      web_ui->GetWebContents()->GetBrowserContext(), kChromeUIWeftHost);
++  webui::SetupWebUIDataSource(source, kWeftResources, IDR_WEFT_INDEX_HTML);
++  // React builds the DOM through the DOM API, not HTML strings; Trusted Types
++  // would only block the bundler's module loader.
++  source->DisableTrustedTypesCSP();
++  source->OverrideContentSecurityPolicy(
++      network::mojom::CSPDirectiveName::StyleSrc,
++      "style-src 'self' 'unsafe-inline';");
++  // Tab favicons are the sites' own URLs.
++  source->OverrideContentSecurityPolicy(
++      network::mojom::CSPDirectiveName::ImgSrc,
++      "img-src 'self' data: blob: https: http:;");
++}
++
++WeftUI::~WeftUI() = default;
++
++}  // namespace weft
+diff --git a/chrome/browser/ui/webui/weft/weft_ui.h b/chrome/browser/ui/webui/weft/weft_ui.h
+new file mode 100644
+index 0000000000..718792d72d
+--- /dev/null
++++ b/chrome/browser/ui/webui/weft/weft_ui.h
+@@ -0,0 +1,38 @@
++// Copyright 2026 Walnut Labs LLC
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_UI_WEBUI_WEFT_WEFT_UI_H_
++#define CHROME_BROWSER_UI_WEBUI_WEFT_WEFT_UI_H_
++
++#include "content/public/browser/web_ui_controller.h"
++#include "content/public/browser/webui_config.h"
++
++namespace weft {
++
++inline constexpr char kChromeUIWeftHost[] = "weft";
++
++class WeftUI;
++
++class WeftUIConfig : public content::DefaultWebUIConfig<WeftUI> {
++ public:
++  WeftUIConfig();
++};
++
++// chrome://weft: the Weft shell. The page is the React app from
++// weft-browser-app/src/renderer, bundled by scripts/build-shell.sh and reused
++// unchanged; it talks to this controller through the WeftApi protocol
++// (weft-browser-app/src/shared/ipc.ts) over chrome.send.
++class WeftUI : public content::WebUIController {
++ public:
++  explicit WeftUI(content::WebUI* web_ui);
++
++  WeftUI(const WeftUI&) = delete;
++  WeftUI& operator=(const WeftUI&) = delete;
++
++  ~WeftUI() override;
++};
++
++}  // namespace weft
++
++#endif  // CHROME_BROWSER_UI_WEBUI_WEFT_WEFT_UI_H_
+diff --git a/chrome/chrome_paks.gni b/chrome/chrome_paks.gni
+index 918f760012..2304ef817c 100644
+--- a/chrome/chrome_paks.gni
++++ b/chrome/chrome_paks.gni
+@@ -235,6 +235,7 @@ template("chrome_extra_paks") {
+     if (!is_android) {
+       # New paks should be added here by default.
+       sources += [
++        "$root_gen_dir/chrome/weft_resources.pak",
+         "$root_gen_dir/chrome/about_sys_resources.pak",
+         "$root_gen_dir/chrome/access_code_cast_resources.pak",
+         "$root_gen_dir/chrome/actor_overlay_resources.pak",
+diff --git a/tools/gritsettings/resource_ids.spec b/tools/gritsettings/resource_ids.spec
+index 3d8a324332..407d74aec0 100644
+--- a/tools/gritsettings/resource_ids.spec
++++ b/tools/gritsettings/resource_ids.spec
+@@ -903,6 +903,10 @@
+     "META": {"sizes": {"includes": [10]}},
+     "includes": [5230],
+   },
++  "<(SHARED_INTERMEDIATE_DIR)/chrome/browser/resources/weft/resources.grd": {
++    "META": {"sizes": {"includes": [10]}},
++    "includes": [5240],
++  },
+   "<(SHARED_INTERMEDIATE_DIR)/chrome/browser/resources/webui_browser/resources.grd": {
+     "META": {"sizes": {"includes": [80]}},
+     "includes": [5250],

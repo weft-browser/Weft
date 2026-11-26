@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" role="img" aria-label="weft mark: a W drawn as one blue thread, with a light weft thread woven through it" viewBox="0 0 64 64">
+  <defs><clipPath id="c"><rect x="21" y="24" width="22" height="12"/></clipPath><clipPath id="d"><rect x="21" y="22" width="22" height="16"/></clipPath></defs>
+  <polyline points="8,16 21,48 32,20 43,48 56,16" fill="none" stroke="#6aa9ff" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+  <rect x="4" y="26" width="56" height="8" rx="4" fill="#e8eaed" stroke="#0e1014" stroke-width="3" paint-order="stroke"/>
+  <polyline clip-path="url(#c)" points="21,48 32,20 43,48" fill="none" stroke="#0e1014" stroke-width="11" stroke-linejoin="round"/>
+  <polyline clip-path="url(#d)" points="21,48 32,20 43,48" fill="none" stroke="#6aa9ff" stroke-width="8" stroke-linejoin="round"/>
+</svg>

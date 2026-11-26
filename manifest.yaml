@@ -1,0 +1,88 @@
+# Weft — product manifest (machine-readable single source of truth).
+# Docs/graphs generate from this. Keep current when repos, packages, or infra change.
+product: weft            # decided 2026-11-06; brand in brand/
+name: Weft
+tagline: A keyboard-first browser organised as workspaces, each with its own environment
+studio: walnut-labs
+platforms:
+  - macOS 14+, Apple silicon only (decided 2026-11-07, product.md)
+
+repository: github.com/weft-browser/weft   # one repo; moved from GitLab (six repos) on 2026-11-26
+
+areas:
+  - path: app
+    role: app                 # the browser that ships today
+    stack: [Electron, TypeScript, React, Vite]
+    processes:
+      - name: main
+        note: owns the model — sessions per workspace, WebContentsView per tab, environments
+      - name: preload
+        note: contextBridge API (`window.weft`) — commands in, state out
+      - name: renderer
+        note: React shell — rail, tab strip, toolbar, panels, palette; UI-only state
+      - name: tab-preload
+        note: runs in every page — editable-focus tracking for the prefix key, link hints
+    dependencies:
+      - name: electron
+        purpose: Chromium, sessions, extensions
+      - name: smol-toml
+        purpose: parse <slug>.env.toml
+      - name: electron-updater
+        purpose: self-update from updates.weftbrowser.com (pinned 6.6.2, matches electron-builder 26.0.12's runtime)
+      - name: wireproxy (external binary, Homebrew)
+        purpose: userspace WireGuard → local SOCKS5, one per VPN region
+
+  - path: chromium
+    role: fork                # side track until parity with the Electron app
+    stack: [Chromium, GN, depot_tools]
+    upstream: chromium stable, pinned in CHROMIUM_VERSION (158.0.8127.18 on 2026-11-06)
+    note: patch series + scripted branding; checkout fetched into chromium/ and never committed
+    processes:
+      - name: shell (chrome://weft)
+        note: owns the model — the app's src/shared plus shell/controller.ts (a port of browser.ts); the React shell reused by path
+      - name: browser (C++)
+        note: the engine — a Profile per workspace, pages as WebContents painted by surface embed, navigation, keys, files, tracker blocking
+
+external:                     # maintainer-run, not in this repository
+  - name: update feed
+    note: private, versioned, Object-Locked S3 bucket behind CloudFront at updates.weftbrowser.com; never renamed, its URL is baked into every install
+  - name: publish role
+    note: an AWS role the release workflow assumes through GitHub OIDC, for the `release` environment of this repository only; it can write the feed and nothing else
+  - name: website
+    note: weftbrowser.com, a static site with no third-party requests; its Download button links https://updates.weftbrowser.com/Weft.dmg
+
+storage:
+  state:
+    file: <userData>/state.json           # Snapshot v1 — versioned contract, fixtures in test/
+    note: disposable workspaces are never written
+  environments:
+    files: <userData>/workspaces/<slug>.env.toml
+    note: one per workspace; what the user keeps in git
+  partitions:
+    persistent: "persist:ws-<id>"
+    disposable: "ws-<id>"                  # in-memory; wiped when the workspace closes
+  extensions:
+    dir: <userData>/extensions/<name>      # unpacked Chrome extensions, per-workspace toggle
+  vpn:
+    dir: <userData>/vpn/<region>.conf      # WireGuard configs, any provider; one userspace tunnel (wireproxy) per region in use
+    legacy: <userData>/vpn.toml            # region = "socks5://host:port" — still honoured
+
+ci:
+  host: GitHub Actions
+  checks: .github/workflows/ci.yml, on every pull request and main, Linux, no secrets — app check/test/build, the fork's shell type-checked against the app, fork scripts and patches, a secret scan
+  release: >
+    .github/workflows/release.yml, when app/package.json's version changes on main to one with no
+    tag: drive the built app (scripts/smoke.drive) on macOS, package (scripts/package-ci.sh: arm64
+    DMG + zip, signed, notarized), publish (GitHub OIDC → the publish role, scripts/publish.sh:
+    downgrade guard, Object-Locked files, feed last), then tag vX.Y.Z
+
+distribution:
+  channel: Developer ID + notarization   # not App Store (extensions + proxies, no sandbox)
+  bundle_id: com.walnutlabs.weft
+  signing: electron-builder, hardened runtime, app/build/entitlements.mac.plist; Walnut Labs LLC Developer ID (team DXJQ64BU3M), credentials as secrets on the release environment
+  updates: electron-updater, generic feed https://updates.weftbrowser.com/latest-mac.yml (zip payload); the Chromium fork moves to Sparkle
+  download: https://updates.weftbrowser.com/Weft.dmg (always the latest)
+  architectures: arm64 (Apple silicon) only; LSMinimumSystemVersion 14.0
+  versioning: semver from app/package.json (updater compares it); CFBundleVersion = 1000 + git commit count
+  rollback_protection: [monotonic build, updater strict-greater, publish.sh downgrade guard, S3 Object Lock COMPLIANCE 2 years]
+  price: free, no paid features (2026-11-06)
