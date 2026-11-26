@@ -13,7 +13,7 @@ import { Palette } from './components/Palette';
 import { PrivacyPanel } from './components/PrivacyPanel';
 import { Rail } from './components/Rail';
 import { TabStrip } from './components/TabStrip';
-import { TabsPanel } from './components/TabsPanel';
+import { TabsPanel, type Scope } from './components/TabsPanel';
 import { Toolbar } from './components/Toolbar';
 
 const RAIL = 72, RAIL_OPEN = 248;
@@ -37,6 +37,7 @@ export function App(): JSX.Element | null {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [pq, setPq] = useState('');
   const [tabsOpen, setTabsOpen] = useState(false);
+  const [tabsScope, setTabsScope] = useState<Scope>('ws');
   const [shiftHeld, setShiftHeld] = useState(false);
   const [shot, setShot] = useState<string | null>(null);
   const [extMsg, setExtMsg] = useState<{ ok: boolean; text: string } | null>(null);
@@ -63,7 +64,7 @@ export function App(): JSX.Element | null {
   const focusRoot = (): void => root.current?.focus({ preventScroll: true });
   const closePanels = (): void => { setPrivacyOpen(false); setEnvOpen(false); setMenu(null); setTabsOpen(false); };
   const closeTabs = (refocus: boolean): void => { setTabsOpen(false); if (refocus) focusRoot(); };
-  const openTabs = (): void => { setTabsOpen(true); setMenu(null); setPaletteOpen(false); setPrivacyOpen(false); };
+  const openTabs = (scope: Scope = 'ws'): void => { setTabsScope(scope); setTabsOpen(true); setMenu(null); setPaletteOpen(false); setPrivacyOpen(false); };
   const openPalette = (): void => { setPaletteOpen(true); setPq(''); closePanels(); };
   const closePalette = (): void => { setPaletteOpen(false); setPq(''); focusRoot(); };
   const startRename = (i: number): void => { if (state) { setRenaming(i); setRenameDraft(state.workspaces[i]?.name ?? ''); } };
@@ -108,7 +109,8 @@ export function App(): JSX.Element | null {
       case 'address': addr.current?.focus(); break;
       case 'menu': if (ws && tab) { setMenu({ target: { kind: 'tab', j: ws.active }, x: (pinned ? RAIL_OPEN : RAIL) + 140, y: 50 }); setPrivacyOpen(false); setTabsOpen(false); } break;
       case 'uiScale': cycleUi(); break;
-      case 'tabs': if (tabsOpen) closeTabs(true); else openTabs(); break;
+      case 'tabs': if (tabsOpen && tabsScope !== 'tidy') closeTabs(true); else openTabs(); break;
+      case 'tidy': if (tabsOpen && tabsScope === 'tidy') closeTabs(true); else openTabs('tidy'); break;
     }
   };
 
@@ -196,7 +198,7 @@ export function App(): JSX.Element | null {
   if (!state || !ws) return null;
   const items = paletteOpen ? paletteItems(pq, {
     state, pinned, send,
-    ui: { env: openEnv, privacy: () => { if (tab?.url) { setPrivacyOpen(true); setEnvOpen(false); } }, rename: () => startRename(state.activeWs), pinRail: () => setPinned((v) => !v), menu: () => ui.current('menu'), uiScale: (v) => send({ type: 'uiScale', v }), tabs: () => ui.current('tabs') }
+    ui: { env: openEnv, privacy: () => { if (tab?.url) { setPrivacyOpen(true); setEnvOpen(false); } }, rename: () => startRename(state.activeWs), pinRail: () => setPinned((v) => !v), menu: () => ui.current('menu'), uiScale: (v) => send({ type: 'uiScale', v }), tabs: () => ui.current('tabs'), tidy: () => ui.current('tidy') }
   }) : [];
   const openPrivacy = (): void => { if (tab?.url) { setPrivacyOpen(true); setEnvOpen(false); setTabsOpen(false); } };
 
@@ -223,7 +225,7 @@ export function App(): JSX.Element | null {
         </main>
         {privacyOpen && tab?.url && <PrivacyPanel state={state} ws={ws} tab={tab} onClose={() => { setPrivacyOpen(false); focusRoot(); }} />}
         {envOpen && <EnvPanel state={state} ws={ws} tab={tab} tabKind={envTab} cfgMsg={cfgMsg} extMsg={extMsg} customIcons={customIcons} onCustomIcon={(src) => setCustomIcons((c) => (c.includes(src) ? c : c.concat([src])))} onTab={(t) => { setEnvTab(t); setCfgMsg(null); }} onClose={() => { setEnvOpen(false); focusRoot(); }} />}
-        {tabsOpen && <TabsPanel state={state} panelRef={tabsPanel} onClose={closeTabs} />}
+        {tabsOpen && <TabsPanel state={state} panelRef={tabsPanel} initial={tabsScope} onClose={closeTabs} />}
       </div>
       {menu && (
         <div ref={menuEl} style={{ position: 'absolute', left: menu.x, top: menu.y, zIndex: 9 }}>

@@ -29,3 +29,10 @@ describe('private tabs and the tab list', () => {
     expect(leaderAction('a')).toMatchObject({ kind: 'ui', ui: 'tabs' });
   });
 });
+
+describe('triage keys', () => {
+  it('c opens the tidy list, s saves the page as text', () => {
+    expect(leaderAction('c')).toEqual({ kind: 'ui', ui: 'tidy' });
+    expect(leaderAction('s')).toMatchObject({ kind: 'cmd', cmd: { type: 'savePage' } });
+  });
+});

@@ -23,6 +23,13 @@ driving.
 - ✅ Releases: 0.1.2 is live (signed, notarized, self-updating from `updates.weftbrowser.com`).
   0.1.0 failed in packaging and 0.1.1 in publishing; neither shipped.
 
+- ✅ Tab triage, layer 1 (2026-11-25, branch `feat/tab-triage`): importance order (`⌃I` in
+  ` a), *Sort tabs by importance*, Tidy close suggestions (` c), Save page as text (` s).
+  Local signals only, no model (product.md § What it refuses to be). Driven headless: Tidy listed
+  the six expected tabs with reasons, ⌘↩ closed them, sort kept pins and the group, the saved
+  Markdown kept the article and dropped nav/aside/footer/hidden. The native Save sheet was stubbed
+  in the drive; press ` s by hand once.
+
 ## Next
 
 1. **Daily-driver gaps**: downloads, find in page, bookmarks, passwords and passkeys, printing.
@@ -60,6 +67,10 @@ driving.
   editable element is focused so a backtick typed into a textarea stays a backtick.
 
 ## Open / parked
+
+- Tab triage, later layers: an on-device model (Apple Foundation Models via a Swift helper, macOS
+  26+) for topic grouping and summaries; a user-chosen endpoint (Ollama / own key), opt-in and
+  declared in the data inventory first. Not started; layer 1 has to prove useful first.
 
 - `strict` fingerprint = "everyone looks the same" implies a fixed UA/screen/fonts profile; scope
   unclear, parked with item 3.

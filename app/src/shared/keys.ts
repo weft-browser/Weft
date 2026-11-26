@@ -1,7 +1,7 @@
 // The prefix-key map. One place: the help card, the palette and both key handlers read it.
 import type { Command } from './ipc';
 
-export type UiAction = 'palette' | 'env' | 'rename' | 'pinRail' | 'address' | 'privacy' | 'menu' | 'uiScale' | 'tabs';
+export type UiAction = 'palette' | 'env' | 'rename' | 'pinRail' | 'address' | 'privacy' | 'menu' | 'uiScale' | 'tabs' | 'tidy';
 export type LeaderAction = { kind: 'cmd'; cmd: Command; focusPage?: boolean } | { kind: 'ui'; ui: UiAction };
 
 export interface KeyDoc { keys: string; label: string; cmdLabel: string; }
@@ -22,6 +22,7 @@ export const KEY_GROUPS: ReadonlyArray<{ title: string; keys: ReadonlyArray<KeyD
     { keys: 'x', label: 'close tab', cmdLabel: 'Close tab' },
     { keys: 'u', label: 'reopen closed', cmdLabel: 'Reopen closed tab' },
     { keys: 'a', label: 'all tabs list', cmdLabel: 'Show all tabs' },
+    { keys: 'c', label: 'tidy: tabs to close', cmdLabel: 'Tidy tabs' },
     { keys: 'P', label: 'pin / unpin', cmdLabel: 'Pin or unpin tab' },
     { keys: 'g', label: 'new group', cmdLabel: 'New group with this tab' },
     { keys: 'G', label: 'collapse group', cmdLabel: 'Collapse or expand group' },
@@ -35,6 +36,7 @@ export const KEY_GROUPS: ReadonlyArray<{ title: string; keys: ReadonlyArray<KeyD
     { keys: '+ - 0', label: 'zoom page', cmdLabel: '' },
     { keys: 'z', label: 'interface size', cmdLabel: 'Cycle interface size' },
     { keys: 'r', label: 'reload', cmdLabel: 'Reload' },
+    { keys: 's', label: 'save page as text', cmdLabel: 'Save page as text' },
     { keys: 'p', label: 'privacy', cmdLabel: 'Privacy panel' },
     { keys: 'b', label: 'pin sidebar', cmdLabel: 'Pin or unpin sidebar' }
   ] }
@@ -61,6 +63,8 @@ export function leaderAction(key: string): LeaderAction | null {
   if (key === 't') return cmd({ type: 'newTab' });
   if (key === 'T') return cmd({ type: 'newTab', private: true });
   if (key === 'a') return ui('tabs');
+  if (key === 'c') return ui('tidy');
+  if (key === 's') return cmd({ type: 'savePage' });
   if (key === 'x') return cmd({ type: 'closeTab' }, true);
   if (key === 'X') return cmd({ type: 'closeWs' }, true);
   if (key === 'u') return cmd({ type: 'reopen' }, true);

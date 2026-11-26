@@ -2,8 +2,11 @@
 // 1. Tells main whether an editable element has focus, so a backtick typed into a
 //    textarea stays a backtick and only a bare backtick becomes the prefix key.
 // 2. Draws link hints on request (` f) and follows the one the user types.
+// 3. Says once per page that the user typed into it, so a draft is never offered for closing.
+// 4. Reads the page's text as blocks on request (` s), for "Save page as text".
 /// <reference lib="dom" />
 import { ipcRenderer } from 'electron';
+import { findRoot, walk, type RNode } from '../shared/readable';
 
 const EDITABLE = new Set(['INPUT', 'TEXTAREA', 'SELECT']);
 
@@ -19,6 +22,34 @@ function report(): void {
 document.addEventListener('focusin', report, true);
 document.addEventListener('focusout', () => setTimeout(report, 0), true);
 window.addEventListener('focus', report);
+
+let edited = false;
+document.addEventListener('input', (e) => {
+  if (edited || !e.isTrusted || !isEditable(e.target as Element | null)) return;
+  edited = true;
+  ipcRenderer.send('weft:edited');
+}, true);
+
+// ── save page as text ───────────────────────────────────────────────────────
+
+/** Not rendered: no box, or invisible by style. `display: contents` has no box of its own but its children show. */
+function hidden(n: RNode): boolean {
+  const el = n as unknown as Element;
+  if (!(el instanceof Element) || typeof el.checkVisibility !== 'function') return false;
+  if (el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })) return false;
+  return getComputedStyle(el).display !== 'contents';
+}
+
+ipcRenderer.on('weft:read', (_e, id: number) => {
+  let blocks: ReturnType<typeof walk> = [];
+  try {
+    const o = { base: location.href, hidden };
+    if (document.body) blocks = walk(findRoot(document.body, o), o);
+  } catch (err) {
+    console.warn('weft: could not read the page: ' + (err as Error).message);
+  }
+  ipcRenderer.send('weft:read-done', { id, title: document.title, url: location.href, blocks });
+});
 
 // ── link hints ──────────────────────────────────────────────────────────────
 

@@ -17,6 +17,7 @@ export interface PaletteCtx {
     menu: () => void;
     uiScale: (v: number) => void;
     tabs: () => void;
+    tidy: () => void;
   };
 }
 
@@ -46,6 +47,9 @@ export function paletteItems(raw: string, ctx: PaletteCtx): PaletteItem[] {
     cmd('New tab', () => send({ type: 'newTab' })),
     cmd('New private tab', () => send({ type: 'newTab', private: true })),
     cmd('Show all tabs', () => ui.tabs()),
+    cmd('Tidy tabs', () => ui.tidy()),
+    cmd('Sort tabs by importance', () => send({ type: 'sortTabs' })),
+    cmd('Save page as text', () => send({ type: 'savePage' })),
     cmd('New workspace', () => send({ type: 'addWs' })),
     cmd('New disposable workspace', () => send({ type: 'addDisposable' })),
     cmd('Workspace environment', () => ui.env('settings')),

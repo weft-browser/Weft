@@ -38,6 +38,32 @@ describe('state.json contract', () => {
     expect(d.allow).toEqual({ [w.id + '|a.example']: true });
   });
 
+  it('keeps the triage timestamps and never writes the live-only signals', () => {
+    const w = newWorkspace('Signals', '#6aa9ff', mkEnv(null, []));
+    w.tabs.push(newTab('https://a.example', 'A', { lastActive: 1795000000000, activeMs: 42000, audible: true, edited: true }));
+    const snap = encodeSnapshot([w], 0, [], {});
+    expect(snap.workspaces[0]!.tabs[0]).toMatchObject({ lastActive: 1795000000000, activeMs: 42000, audible: false, edited: false });
+    expect(decodeSnapshot(JSON.parse(JSON.stringify(snap)), []).workspaces[0]!.tabs[0]).toMatchObject({ lastActive: 1795000000000, activeMs: 42000 });
+  });
+
+  it('reads tabs from before the triage timestamps as used just now, so an upgrade suggests closing nothing', () => {
+    const before = Date.now();
+    const d = decodeSnapshot(JSON.parse(readFileSync(join(FIX, 'state-2026-11-06.json'), 'utf8')), []);
+    const tabs = d.workspaces.flatMap((w) => w.tabs).concat(d.closed.map((c) => c.tab));
+    expect(tabs.every((t) => t.lastActive >= before && t.activeMs === 0)).toBe(true);
+  });
+
+  it('clamps triage timestamps it cannot trust: a future time, a negative or non-number total', () => {
+    const future = Date.now() + 9e9;
+    const d = decodeSnapshot({ v: 1, workspaces: [{ name: 'Odd', tabs: [{ url: 'https://a.example', lastActive: future, activeMs: -5 }, { url: 'https://b.example', lastActive: 'x', activeMs: null }] }] }, []);
+    const [a, b] = d.workspaces[0]!.tabs;
+    expect(a!.lastActive).toBeLessThan(future);
+    expect(a!.activeMs).toBe(0);
+    expect(typeof b!.lastActive).toBe('number');
+    expect(b!.activeMs).toBe(0);
+    expect(d.warnings).toEqual([]);
+  });
+
   it('never writes a disposable workspace', () => {
     const keep = newWorkspace('Keep', '#6aa9ff', mkEnv(null, []));
     const gone = newWorkspace('Gone', '#e5c07b', mkEnv({ disposable: true }, []));

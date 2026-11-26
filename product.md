@@ -33,7 +33,12 @@ Who it is not for: someone who wants Chrome with a different skin. Weft asks for
 - **Not a VPN provider.** Weft runs *your* WireGuard configs (NordVPN, Mullvad, Proton, a home
   box) as per-workspace tunnels. Selling exits would make Weft a party to the traffic; it is not.
 - **Not an AI browser that reads your pages for you.** AI is a *user* of Weft (see below), not a
-  layer between the person and the page.
+  layer between the person and the page. Reaffirmed 2026-11-25 when tab triage was built: ranking
+  tabs, suggesting closes and saving a page as text work from **local signals** (when a tab was in
+  front, for how long, whether it plays sound or holds typed text) and a local reader, with no
+  model and nothing leaving the Mac. A suggestion never acts on its own: the person confirms each
+  close. If a model is ever added, it runs on device by default, and an off-device one is opt-in,
+  named where it is chosen, and declared in the data inventory first.
 
 ## How it earns
 

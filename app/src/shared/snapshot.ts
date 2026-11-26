@@ -48,14 +48,18 @@ function decodeEnv(v: unknown, extNames: string[]): Env {
   }, extNames);
 }
 
-function decodeTab(v: unknown): Tab | null {
+/** Triage timestamps are optional: a file written before them reads as "used now", not as weeks
+ *  stale, so an upgrade never makes every tab a close suggestion. A future time (clock moved) clamps to now. */
+function decodeTab(v: unknown, now = Date.now()): Tab | null {
   if (!obj(v)) return null;
   const url = str(v.url, '');
   const t = newTab(url, str(v.title, ''), {
     pinned: bool(v.pinned, false),
     group: typeof v.group === 'string' ? v.group : null,
     icon: decodeIcon(v.icon),
-    favicon: typeof v.favicon === 'string' ? v.favicon : null
+    favicon: typeof v.favicon === 'string' ? v.favicon : null,
+    lastActive: Math.min(now, num(v.lastActive, now)),
+    activeMs: Math.max(0, num(v.activeMs, 0))
   });
   if (typeof v.id === 'string' && v.id) t.id = v.id;
   return t;
@@ -112,7 +116,7 @@ export function encodeSnapshot(workspaces: Workspace[], activeWs: number, closed
   const kept = workspaces.filter((w) => !w.env.disposable);
   const ids = new Set(kept.map((w) => w.id));
   const cur = workspaces[activeWs];
-  const strip = (t: Tab): Tab => ({ ...t, blocked: 0, loading: false, canBack: false, canFwd: false, history: [], histPos: 0, zoom: 1 });
+  const strip = (t: Tab): Tab => ({ ...t, blocked: 0, loading: false, canBack: false, canFwd: false, history: [], histPos: 0, zoom: 1, audible: false, edited: false });
   const publicTabs = (w: Workspace): Workspace => {
     const tabs = w.tabs.filter((t) => !t.private);
     const before = w.tabs.slice(0, w.active).filter((t) => t.private).length;

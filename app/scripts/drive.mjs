@@ -73,7 +73,7 @@ const CMD = {
     for (const k of keys.split(' ')) { await pg.keyboard.press(k); await sleep(150); }
   },
   /** Evaluate in the main process: `main BrowserWindow.getAllWindows()[0].webContents.isFocused()` */
-  async main(js) { out(JSON.stringify(await app.evaluate((electron, src) => (0, eval)('(({ BrowserWindow, webContents, app }) => (' + src + '))')(electron), js))); },
+  async main(js) { out(JSON.stringify(await app.evaluate((electron, src) => (0, eval)('(({ BrowserWindow, webContents, app, dialog }) => (' + src + '))')(electron), js))); },
   async click(sel) { await shell.locator(sel).first().click(); await sleep(200); },
   async rclick(sel) { await shell.locator(sel).first().click({ button: 'right' }); await sleep(200); },
   async hover(sel) { await shell.locator(sel).first().hover(); await sleep(300); },

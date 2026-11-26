@@ -36,6 +36,12 @@ export interface Tab {
   history: HistEntry[];
   histPos: number;
   zoom: number;
+  /** Triage signals (triage.ts), all local. When the tab was last in front (epoch ms) and its total time there. */
+  lastActive: number;
+  activeMs: number;
+  /** Live only, never persisted: playing sound; holds text typed since it last navigated. */
+  audible: boolean;
+  edited: boolean;
 }
 
 export interface Group {
@@ -153,7 +159,7 @@ export function mkEnv(o: Partial<Env> | null | undefined, extNames: string[]): E
 }
 
 export function newTab(url = '', title = '', extra: Partial<Tab> = {}): Tab {
-  const t: Tab = { id: uid('tab'), url, title: title || (url ? titleFor(url) : 'New tab'), pinned: false, group: null, icon: null, favicon: null, private: false, blocked: 0, loading: false, canBack: false, canFwd: false, history: [], histPos: 0, zoom: 1, ...extra };
+  const t: Tab = { id: uid('tab'), url, title: title || (url ? titleFor(url) : 'New tab'), pinned: false, group: null, icon: null, favicon: null, private: false, blocked: 0, loading: false, canBack: false, canFwd: false, history: [], histPos: 0, zoom: 1, lastActive: Date.now(), activeMs: 0, audible: false, edited: false, ...extra };
   if (t.private && !url && !title) t.title = 'Private tab';
   return t;
 }

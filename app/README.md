@@ -32,10 +32,28 @@ anywhere, shell or page, without the prefix.
 | `X` | close | `P` | pin / unpin | `r` | reload |
 | | | `g` | new group | `p` | privacy |
 | | | `G` | collapse group | `b` | pin sidebar |
-| | | `m` | tab menu | | |
+| | | `m` | tab menu | `s` | save page as text |
+| | | `c` | tidy: tabs to close | | |
 
 In the palette and the all-tabs list: `↑` `↓` or `⌃N` `⌃P` move, `Home` `End` and `PageUp`
 `PageDown` jump, `Enter` runs, `Esc` closes; `⌘⌫` in the tabs list closes the selected tab.
+
+**Tab triage** works from local signals only, with no page content and no model (`src/shared/triage.ts`):
+when each tab was last in front, its total time in front (one stretch counts for at most 30 min,
+and nothing counts while Weft is in the background, the Mac sleeps or is locked), and whether it is
+playing sound or holds text typed since it last navigated. In the all-tabs list, `⌃I` orders by
+importance and says why under each tab; the palette's *Sort tabs by importance* reorders the strip
+(pins keep their order, a group moves with its most important tab). `` ` c `` opens **Tidy**: empty
+tabs, duplicates, search results unused for an hour, tabs not opened in 3 days, and tabs opened a
+day ago but in front for under 30 s, each with its reason. Nothing closes until you press `⌘⌫` or
+`⌘↩` (all); `` ` u `` reopens. The current tab, pins, tabs playing sound or holding typed text and
+private tabs are never suggested.
+
+**Save page as text** (`` ` s ``) writes the page's readable part as Markdown (title, source URL,
+time and workspace in front matter), to a place you choose in the Save sheet. The reader
+(`src/shared/readable.ts`) runs in the page's preload, keeps headings, paragraphs, links,
+emphasis, lists, quotes, code and tables, and drops navigation, footers, sidebars, scripts and
+anything hidden.
 
 Extensions: paste a Chrome Web Store link (or a 32-letter id) into the Environment panel and
 press Install; the extension lands in `extensions/` and is switched on in that workspace. Electron

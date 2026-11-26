@@ -1,7 +1,8 @@
 // The controller: owns the model, the window, one session per workspace and one
 // WebContentsView per tab. The renderer is a view over `state()` and talks in commands.
-import { BrowserWindow, Menu, WebContentsView, clipboard, ipcMain, shell, type MenuItemConstructorOptions, type WebContents } from 'electron';
-import { join } from 'node:path';
+import { BrowserWindow, Menu, WebContentsView, app, clipboard, dialog, ipcMain, powerMonitor, shell, type MenuItemConstructorOptions, type WebContents } from 'electron';
+import { writeFile } from 'node:fs/promises';
+import { basename, dirname, join } from 'node:path';
 import { CH, type Command, type Event, type HudState, type Rect } from '../shared/ipc';
 import { MODIFIER_KEYS, leaderAction, type UiAction } from '../shared/keys';
 import {
@@ -11,6 +12,8 @@ import {
 import { cfgIcon, colorFromFile, envFromFile, parse as parseEnv, serialize } from '../shared/envfile';
 import { decodeSnapshot, encodeSnapshot } from '../shared/snapshot';
 import * as ops from '../shared/ops';
+import * as triage from '../shared/triage';
+import { fileName, toMarkdown, type Block } from '../shared/readable';
 import { createHud, placeHud } from './hud';
 import { installMenu } from './menu';
 import { WsSession, privatePartition } from './sessions';
@@ -18,6 +21,8 @@ import { installFromWebStore } from './webstore';
 import { Tunnels, findWireproxy } from './tunnels';
 import { Updater, type UpdateEngine } from './updater';
 import { ensureDirs, listExtensions, paths, readSnapshot, readVpn, removeEnvFile, writeEnvFile, writeSnapshot, type Paths } from './store';
+
+interface PageText { title: string; url: string; blocks: Block[]; }
 
 interface Boot { shellPreload: string; tabPreload: string; version: string; updates: UpdateEngine | null; }
 
@@ -50,6 +55,11 @@ export class Browser {
   private wcTab = new Map<number, { wsId: string; tabId: string }>();
   private zoomMem = new Map<string, number>();
   private envFiles = new Map<string, { file: string; text: string }>();
+  /** The tab in front and since when, while the window has focus (triage time-in-front). */
+  private front: { tabId: string; since: number } | null = null;
+  private reads = new Map<number, { wcId: number; done: (r: PageText | null) => void }>();
+  private readSeq = 0;
+  private saveDir = '';
   private timers: { emit?: NodeJS.Immediate; save?: NodeJS.Timeout; close?: NodeJS.Timeout; toast?: NodeJS.Timeout } = {};
 
   constructor(private boot: Boot) {}
@@ -94,6 +104,11 @@ export class Browser {
     this.showTab();
     this.emit();
     this.updater.start();
+    // Time in front stops while the Mac sleeps or is locked, not just when Weft loses focus.
+    powerMonitor.on('suspend', () => this.endFront());
+    powerMonitor.on('lock-screen', () => this.endFront());
+    powerMonitor.on('resume', () => this.startFront());
+    powerMonitor.on('unlock-screen', () => this.startFront());
   }
 
   /** Tunnels follow the workspaces: one per region in use, none for regions nobody uses. */
@@ -119,7 +134,8 @@ export class Browser {
     this.win.once('ready-to-show', () => this.win.show());
     this.win.on('resize', () => this.relayout());
     this.win.on('move', () => this.relayout());
-    this.win.on('blur', () => { if (this.leader) this.setLeader(false); });
+    this.win.on('blur', () => { this.endFront(); if (this.leader) this.setLeader(false); });
+    this.win.on('focus', () => this.startFront());
     this.win.on('closed', () => { this.flushSave(); });
     if (process.env.ELECTRON_RENDERER_URL) this.win.loadURL(process.env.ELECTRON_RENDERER_URL + '/index.html');
     else this.win.loadFile(join(__dirname, '../renderer/index.html'));
@@ -130,6 +146,17 @@ export class Browser {
     ipcMain.on(CH.command, (e, cmd: Command) => { if (e.sender === this.win.webContents) this.dispatch(cmd); });
     ipcMain.on('weft:editable', (e, on: boolean) => { if (on) this.editable.add(e.sender.id); else this.editable.delete(e.sender.id); });
     ipcMain.on('weft:hints-done', () => this.setHud({ hinting: false }));
+    ipcMain.on('weft:edited', (e) => {
+      const ref = this.wcTab.get(e.sender.id);
+      const t = ref ? this.findTab(ref.tabId) : null;
+      if (t && !t.edited) { t.edited = true; this.emit(); }
+    });
+    ipcMain.on('weft:read-done', (e, r: { id?: unknown; title?: unknown; url?: unknown; blocks?: unknown }) => {
+      const pending = typeof r?.id === 'number' ? this.reads.get(r.id) : undefined;
+      if (!pending || pending.wcId !== e.sender.id) return;
+      this.reads.delete(r.id as number);
+      pending.done(Array.isArray(r.blocks) ? { title: typeof r.title === 'string' ? r.title : '', url: typeof r.url === 'string' ? r.url : '', blocks: r.blocks as Block[] } : null);
+    });
     ipcMain.on('weft:open-link', (e, o: { url: string; private: boolean }) => {
       const ref = this.wcTab.get(e.sender.id);
       if (!ref || typeof o?.url !== 'string' || !/^https?:/i.test(o.url)) return;
@@ -197,6 +224,8 @@ export class Browser {
 
   private flushSave(): void {
     clearTimeout(this.timers.save);
+    // Bank the running stretch so time in front survives a crash, then keep counting.
+    if (this.front && !this.win.isDestroyed()) this.startFront(); else this.endFront();
     try {
       writeSnapshot(this.p, encodeSnapshot(this.ws, this.activeWs, this.closed, this.allow));
     } catch (e) {
@@ -221,6 +250,28 @@ export class Browser {
   // ── helpers ─────────────────────────────────────────────────────────────
 
   private cur(): Workspace { return this.ws[this.activeWs]!; }
+  private findTab(id: string): Tab | null {
+    for (const w of this.ws) { const t = w.tabs.find((x) => x.id === id); if (t) return t; }
+    return null;
+  }
+
+  private endFront(): void {
+    if (!this.front) return;
+    const t = this.findTab(this.front.tabId);
+    if (t) triage.endStretch(t, this.front.since, Date.now());
+    this.front = null;
+  }
+
+  /** A new stretch for the active tab, closing the previous one; none while the window is in the background. */
+  private startFront(): void {
+    this.endFront();
+    if (this.win.isDestroyed() || !this.win.isFocused()) return;
+    const t = this.tabOf(this.cur());
+    if (!t) return;
+    const now = Date.now();
+    t.lastActive = now;
+    this.front = { tabId: t.id, since: now };
+  }
   private tabOf(ws: Workspace, j?: number): Tab | null { return ws.tabs[j ?? ws.active] ?? null; }
   private viewOf(tab: Tab | null): WebContentsView | undefined { return tab ? this.views.get(tab.id) : undefined; }
   private wcOf(tab: Tab | null): WebContents | undefined { return this.viewOf(tab)?.webContents; }
@@ -288,7 +339,8 @@ export class Browser {
     wc.on('page-favicon-updated', (_e, icons) => { const f = find(); if (f) { f.tab.favicon = icons[0] ?? null; this.emit(); } });
     wc.on('did-start-loading', () => { const f = find(); if (f) { f.tab.loading = true; this.emit(); } });
     wc.on('did-stop-loading', () => { const f = find(); if (f) { f.tab.loading = false; this.syncNav(f.tab, wc); this.emit(); } });
-    wc.on('did-start-navigation', (details) => { if (details.isMainFrame && !details.isSameDocument) { const f = find(); if (f) { f.tab.blocked = 0; this.topHost.set(wc.id, hostOf(details.url)); } } });
+    wc.on('did-start-navigation', (details) => { if (details.isMainFrame && !details.isSameDocument) { const f = find(); if (f) { f.tab.blocked = 0; f.tab.edited = false; this.topHost.set(wc.id, hostOf(details.url)); } } });
+    wc.on('audio-state-changed', (e) => { const f = find(); if (f && f.tab.audible !== e.audible) { f.tab.audible = e.audible; this.emit(); } });
     wc.on('did-navigate', (_e, url) => { const f = find(); if (f) { f.tab.url = url; this.topHost.set(wc.id, hostOf(url)); this.syncNav(f.tab, wc); this.applyZoom(f.ws, f.tab); this.emit(); } });
     wc.on('did-navigate-in-page', (_e, url, isMain) => { if (isMain) { const f = find(); if (f) { f.tab.url = url; this.syncNav(f.tab, wc); this.emit(); } } });
     wc.on('update-target-url', (_e, url) => this.setHud({ hover: url }));
@@ -396,6 +448,7 @@ export class Browser {
       this.relayout();
     }
     this.win.setTitle((tab?.title ? tab.title + ' — ' : '') + ws.name);
+    if (this.front?.tabId !== tab?.id) this.startFront();
   }
 
   private relayout(): void {
@@ -477,6 +530,9 @@ export class Browser {
       case 'jumpTo': { const wc = this.wcOf(this.tabOf(ws)); if (wc && cmd.p >= 0 && cmd.p < wc.navigationHistory.length()) wc.navigationHistory.goToIndex(cmd.p); break; }
       case 'copyLink': this.copyLink(cmd.url); break;
       case 'closeTab': this.closeTab(cmd.j ?? ws.active, cmd.ws); break;
+      case 'closeTabs': this.closeTabs(cmd.ids, cmd.ws ?? this.activeWs); break;
+      case 'sortTabs': { this.endFront(); triage.sortByImportance(ws, Date.now()); this.startFront(); this.showTab(); this.emit(); this.toast('Sorted ' + ws.name + ' by importance · pins stay where you put them'); break; }
+      case 'savePage': void this.savePage(); break;
       case 'reopen': this.reopen(); break;
       case 'togglePin': this.togglePin(cmd.j ?? ws.active); break;
       case 'setTabIcon': { const t = this.tabOf(ws, cmd.j); if (t) { t.icon = cmd.icon; this.emit(); } break; }
@@ -713,6 +769,55 @@ export class Browser {
     this.closed = ops.remember(this.closed, ws, [t]);
     this.showTab();
     this.emit();
+  }
+
+  private closeTabs(ids: string[], wi: number): void {
+    const ws = this.ws[wi];
+    if (!ws) return;
+    let n = 0;
+    for (const id of ids) {
+      if (this.ws[wi] !== ws) break; // a disposable workspace closed with its last tab
+      const j = ws.tabs.findIndex((t) => t.id === id);
+      if (j < 0) continue;
+      this.closeTab(j, wi);
+      n += 1;
+    }
+    if (n) this.toast('Closed ' + n + (n === 1 ? ' tab' : ' tabs') + ' · ` u reopens');
+  }
+
+  /** Ask the page's preload for its readable text; null when it does not answer in time. */
+  private readPage(wc: WebContents): Promise<PageText | null> {
+    return new Promise((resolve) => {
+      const id = ++this.readSeq;
+      const timer = setTimeout(() => { this.reads.delete(id); resolve(null); }, 5000);
+      this.reads.set(id, { wcId: wc.id, done: (r) => { clearTimeout(timer); resolve(r); } });
+      wc.send('weft:read', id);
+    });
+  }
+
+  /** The page's readable text as Markdown, saved where the user says. Nothing is written until they pick a place. */
+  private async savePage(): Promise<void> {
+    const ws = this.cur();
+    const tab = this.tabOf(ws);
+    const wc = this.wcOf(tab);
+    if (!tab || !tab.url || !wc || wc.isDestroyed()) { this.toast('Nothing to save: this tab has no page'); return; }
+    const r = await this.readPage(wc);
+    if (!r) { this.toast('Could not read this page'); return; }
+    if (!r.blocks.length) { this.toast('No readable text found on this page'); return; }
+    const title = r.title || tab.title;
+    const md = toMarkdown({ title, url: r.url || tab.url, saved: new Date().toISOString(), workspace: ws.name }, r.blocks);
+    const res = await dialog.showSaveDialog(this.win, {
+      title: 'Save page as text', defaultPath: join(this.saveDir || app.getPath('documents'), fileName(title, tab.url)),
+      filters: [{ name: 'Markdown', extensions: ['md'] }], properties: ['createDirectory', 'showOverwriteConfirmation']
+    });
+    if (res.canceled || !res.filePath) return;
+    try {
+      await writeFile(res.filePath, md, 'utf8');
+      this.saveDir = dirname(res.filePath);
+      this.toast('Saved ' + basename(res.filePath));
+    } catch (e) {
+      this.toast('Could not save: ' + (e as Error).message);
+    }
   }
 
   private reopen(): void {

@@ -25,6 +25,12 @@ export type Command =
   | { type: 'jumpTo'; p: number }
   | { type: 'copyLink'; url: string }
   | { type: 'closeTab'; j?: number; ws?: number }
+  /** Close several tabs by id (indices shift as they go), e.g. the accepted close suggestions. */
+  | { type: 'closeTabs'; ids: string[]; ws?: number }
+  /** Reorder the current workspace's strip by importance (triage.ts); pins keep their order. */
+  | { type: 'sortTabs' }
+  /** Save the current page's readable text as a Markdown file the user places. */
+  | { type: 'savePage' }
   | { type: 'reopen' }
   | { type: 'togglePin'; j?: number }
   | { type: 'setTabIcon'; j?: number; icon: Icon | null }
