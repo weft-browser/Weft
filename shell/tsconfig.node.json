@@ -1,5 +1,5 @@
 {
   "extends": "./tsconfig.base.json",
   "compilerOptions": { "composite": true, "types": ["node"], "lib": ["ES2022"] },
-  "include": ["vitest.config.mts", "src/shared/**/*", "test/**/*"]
+  "include": ["vitest.config.mts", "src/shared/**/*", "test/**/*", "dev/fake-engine.ts"]
 }

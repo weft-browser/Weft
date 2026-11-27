@@ -12,12 +12,22 @@ everything in `src/shared` is unit-tested without a browser.
 
 ```sh
 npm install
+npm run dev      # the shell in your browser, on a fake engine: http://localhost:5173
 npm run check    # TypeScript: the model, the shell, and the fork's controller against both
 npm test         # vitest
 npm run build    # bundle the shell exactly as the fork does, into out/shell/
 ```
 
-Node 24. This runs on any OS. To see the shell in a real window you need a Chromium build:
+Node 24, any OS.
+
+**`npm run dev`** runs the real shell and the real controller in an ordinary browser tab, with
+`dev/fake-engine.ts` standing in for the browser process. Tabs, workspaces, panels, the palette,
+the prefix key and Tidy all work, and state is kept in the tab's `localStorage`. No page is
+loaded and nothing is enforced (no proxy, no blocking, no extensions): where a page would be you
+see the shell's backdrop. `weftDev.log` in the console lists every message the shell sent the
+engine. `npm run dev:smoke -- http://localhost:5173/` drives it in headless Chrome.
+
+To see the shell in the real browser you need a Chromium build:
 [`../chromium/README.md`](../chromium/README.md).
 
 ## Keys

@@ -11,5 +11,5 @@
       "react-dom/client": ["../../shell/node_modules/@types/react-dom/client"]
     }
   },
-  "include": ["./*.ts", "./*.tsx", "../../shell/src/renderer/**/*", "../../shell/src/shared/**/*", "../../shell/src/renderer/weft.d.ts"]
+  "include": ["./*.ts", "./*.tsx", "../../shell/src/renderer/**/*", "../../shell/src/shared/**/*", "../../shell/src/renderer/weft.d.ts", "../../shell/dev/*.ts", "../../shell/dev/*.tsx"]
 }

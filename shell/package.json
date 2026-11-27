@@ -5,10 +5,12 @@
   "license": "MPL-2.0",
   "description": "Weft's shell and model: the React interface and the pure TypeScript the Chromium fork builds into chrome://weft.",
   "scripts": {
+    "dev": "vite --config dev/vite.config.mjs",
     "check": "tsc -p tsconfig.node.json --noEmit && tsc -p tsconfig.web.json --noEmit && tsc -p ../chromium/shell --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "build": "vite build --config ../chromium/shell/vite.config.mjs --outDir \"$PWD/out/shell\" --logLevel warn"
+    "build": "vite build --config ../chromium/shell/vite.config.mjs --outDir \"$PWD/out/shell\" --logLevel warn",
+    "dev:smoke": "node dev/smoke.mjs"
   },
   "dependencies": {
     "smol-toml": "^1.9.1"

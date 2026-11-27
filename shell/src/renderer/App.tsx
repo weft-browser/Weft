@@ -4,7 +4,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react
 import type { Event } from '../shared/ipc';
 import { MODIFIER_KEYS, type UiAction } from '../shared/keys';
 import { UI_SCALES, activeTab } from '../shared/model';
-import { send, useBrowserState } from './api';
+import { latestState, send, useBrowserState } from './api';
 import { paletteItems } from './palette-items';
 import { ContextMenu, menuItems, type MenuTarget } from './components/ContextMenu';
 import { EnvPanel } from './components/EnvPanel';
@@ -67,7 +67,7 @@ export function App(): JSX.Element | null {
   const openTabs = (scope: Scope = 'ws'): void => { setTabsScope(scope); setTabsOpen(true); setMenu(null); setPaletteOpen(false); setPrivacyOpen(false); };
   const openPalette = (): void => { setPaletteOpen(true); setPq(''); closePanels(); };
   const closePalette = (): void => { setPaletteOpen(false); setPq(''); focusRoot(); };
-  const startRename = (i: number): void => { if (state) { setRenaming(i); setRenameDraft(state.workspaces[i]?.name ?? ''); } };
+  const startRename = (i: number): void => { const s = latestState() ?? state; if (s) { setRenaming(i); setRenameDraft(s.workspaces[i]?.name ?? ''); } };
   const endRename = (save: boolean): void => {
     if (renaming === null) return;
     if (save && renameDraft.trim()) send({ type: 'renameWs', i: renaming, name: renameDraft });
@@ -104,7 +104,8 @@ export function App(): JSX.Element | null {
       case 'palette': if (paletteOpen) closePalette(); else openPalette(); break;
       case 'env': if (envOpen) { setEnvOpen(false); focusRoot(); } else openEnv('settings'); break;
       case 'privacy': if (tab?.url) { setPrivacyOpen((v) => !v); setEnvOpen(false); } break;
-      case 'rename': if (state) startRename(state.activeWs); break;
+      // Sent right after `addWs` selects the new workspace: read the newest state, not the rendered one.
+      case 'rename': { const s = latestState() ?? state; if (s) startRename(s.activeWs); break; }
       case 'pinRail': setPinned((v) => !v); break;
       case 'address': addr.current?.focus(); break;
       case 'menu': if (ws && tab) { setMenu({ target: { kind: 'tab', j: ws.active }, x: (pinned ? RAIL_OPEN : RAIL) + 140, y: 50 }); setPrivacyOpen(false); setTabsOpen(false); } break;
