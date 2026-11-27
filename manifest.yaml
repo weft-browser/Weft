@@ -2,6 +2,7 @@
 # Docs/graphs generate from this. Keep current when repos, packages, or infra change.
 product: weft            # decided 2026-11-06; brand in brand/
 name: Weft
+license: MPL-2.0          # code only; the name and the mark are Walnut Labs LLC's and are not licensed
 tagline: A keyboard-first browser organised as workspaces, each with its own environment
 studio: walnut-labs
 platforms:

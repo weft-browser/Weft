@@ -58,6 +58,10 @@ an open pull request. You are accountable for what it sends.
 
 ## Licence
 
-Weft's licence is being chosen ahead of the repository becoming public. Until a `LICENSE` file
-is present, contributions are by invitation, and you agree they may be released under the
-licence the project adopts.
+Weft is licensed under the [Mozilla Public License 2.0](./LICENSE). By sending a pull request you
+agree that your contribution is licensed under the same terms, and that you have the right to
+contribute it. Do not paste in code under a licence that MPL-2.0 cannot include.
+
+The name *Weft* and the Woven W mark belong to Walnut Labs LLC and are not covered by the licence
+(MPL-2.0 grants no rights in names or logos): you may build and share your own version of the code, but not call it Weft or ship it
+with Weft's icon.
