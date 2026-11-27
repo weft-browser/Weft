@@ -16,15 +16,17 @@ their agents.
   nothing imports a file outside the repo.
 - ✅ GitHub Actions: `ci.yml` (no secrets, safe for forks) and `release.yml` (drive → sign →
   notarize → publish → tag). Run locally in full except the workflows themselves.
-- ⏳ Not yet on GitHub: the organization `weft-browser` has to be created by a maintainer.
-- ⏳ Release wiring: the AWS publish role must trust this repository's `release` environment;
-  the five signing secrets and `AWS_PUBLISH_ROLE_ARN` must be set there.
+- ✅ On GitHub (2026-11-26): `weft-browser/Weft`, the task list seeded as Issues, a `release`
+  environment restricted to `main`.
+- ⏳ Release wiring (#12): the AWS publish role must trust this repository's `release`
+  environment; the five signing secrets and `AWS_PUBLISH_ROLE_ARN` must be set.
 
 ## Next
 
-1. Push, protect `main`, create the `release` environment (main only), seed Issues.
+1. Release wiring (#12).
 2. First release from GitHub (0.1.3, with tab triage): proves the pipeline end to end.
-3. Licence, then a history check, then public. Hosted Mac minutes are limited while private.
+3. Public (MPL-2.0, chosen 2026-11-27): then protect `main` and switch on private vulnerability
+   reporting.
 4. Daily-driver gaps (downloads, find in page, bookmarks, passwords, printing): one issue each.
 5. The agent port (`product.md` § AI-forward direction): spec first.
 
@@ -41,6 +43,8 @@ their agents.
 - The website and the AWS infrastructure stay in maintainer-run repositories for now.
 
 ## Open / parked
+
+- Whether `chromium/patches/` needs MPL headers: the patches apply to BSD-licensed Chromium files.
 
 - The patches in `chromium/patches/` still say `weft-browser-app/…` in comments; fix on the next
   patch refresh, when a checkout can prove they still apply.
