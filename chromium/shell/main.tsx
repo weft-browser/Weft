@@ -3,10 +3,10 @@
 // in the shell document can paint over a native page view; here the page is an element of this
 // document, so the HUD is one too.
 import './bridge';
-import '../../app/src/renderer/styles.css';
+import '../../shell/src/renderer/styles.css';
 import { createRoot } from 'react-dom/client';
-import { App } from '../../app/src/renderer/App';
-import { Hud } from '../../app/src/renderer/components/Hud';
+import { App } from '../../shell/src/renderer/App';
+import { Hud } from '../../shell/src/renderer/components/Hud';
 
 createRoot(document.getElementById('root')!).render(
   <>

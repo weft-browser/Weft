@@ -1,7 +1,7 @@
 // The shell's side of the engine protocol: what Electron's WebContents/session gave browser.ts,
 // over chrome.send. Replies come back through window.__weft.resolve(requestId, reply), events
 // through window.__weft.event(event). The browser side is chrome/browser/ui/webui/weft/weft_ui.cc.
-import type { HistEntry } from '../../app/src/shared/model';
+import type { HistEntry } from '../../shell/src/shared/model';
 
 declare const chrome: { send(message: string, args?: unknown[]): void };
 

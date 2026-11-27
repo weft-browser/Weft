@@ -44,9 +44,8 @@ Accessibility is a tenet, not polish. The baseline is **WCAG 2.1 AA** for every 
 - **No AI attribution** in commits or pull request descriptions (no `Co-Authored-By` trailers for
   an assistant, no "generated with" lines). The author is whoever is accountable for the change.
 - **A pull request references its issue** (`Fixes #N`) when one exists.
-- **Version bumps default to a patch.** A merge that changes `app/package.json`'s version ships a
-  release, so the component you bump is the release decision. Propose a minor explicitly, with
-  the reason; never bump major without a maintainer's decision.
+- **Version bumps default to a patch.** Propose a minor explicitly, with the reason; never bump
+  major without a maintainer's decision. A bump is a release decision, so it is a maintainer's.
 
 ## Privacy and data
 
@@ -61,13 +60,10 @@ Accessibility is a tenet, not polish. The baseline is **WCAG 2.1 AA** for every 
 ## Secrets and releases
 
 - **Nothing secret in the repository**, ever: no keys, tokens, certificates or `.env` files.
-- Release credentials (the signing certificate, the notarization key) are GitHub secrets on the
-  `release` environment, readable only by the release workflow on `main`. Pull requests from
-  forks never see them.
-- AWS access is keyless: the release workflow assumes a role through GitHub OIDC for one job.
-- Signing imports the certificate into a throwaway keychain that is destroyed when the job ends.
-- A release is never retried automatically and never runs twice at once: publishing is not safely
-  repeatable.
+- CI on pull requests uses no secrets, so it is safe for forks.
+- When the fork gets its release pipeline: credentials only where a run on `main` can read them,
+  AWS access keyless through OIDC, the certificate in a throwaway keychain destroyed with the job,
+  and a release never retried automatically or run twice at once.
 
 ## Security issues
 

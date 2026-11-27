@@ -6,7 +6,7 @@
 //
 //   node scripts/drive.mjs [dev|release] <url> [--wait ms] [--out file.png]
 //   node scripts/drive.mjs dev 'chrome://weft/?page=https://example.com' --wait 4000
-import { chromium } from '../../app/node_modules/playwright-core/index.mjs';
+import { chromium } from '../../shell/node_modules/playwright-core/index.mjs';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
 import * as os from 'node:os';

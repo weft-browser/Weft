@@ -1,13 +1,48 @@
 # Weft on Chromium — Working Plan
 
-> Moved into the single `weft` repository on 2026-11-26. Older entries name the GitLab repos
-> (`weft-browser-app`, `weft-browser-core`, `weft-browser-chromium`); they are history. Paths are now `app/`, the repository root, and `chromium/`.
+> Older entries name GitLab repos (`weft-browser-app`, `weft-browser-core`,
+> `weft-browser-chromium`) and `app/`; they are history. The interface now lives in `shell/`.
 
 ## Objective
 
-Weft on its own Chromium fork, reaching parity with the Electron app and then past it: extension
-popups, same-day security releases, shell chrome that paints over a live page. Pinned to stable
-**158.0.8127.18** (2026-11-06).
+Weft is this fork (decided 2026-11-27; the Electron app is archived under the tag
+`electron-final`). Get it to a signed, self-updating release, then keep it within days of every
+Chromium stable. Pinned to stable **158.0.8127.18** (2026-11-06).
+
+## What the Electron app did, and where the fork stands
+
+So nothing is lost. "Was in" paths are under the tag: `git show electron-final:app/<path>`.
+Verify the ❓ rows on a build.
+
+| Behaviour | Fork | Was in |
+|---|---|---|
+| Workspaces × tabs, pins, groups, reopen closed | ✅ `shell/controller.ts` | `src/main/browser.ts` |
+| A workspace's own storage; private tabs; disposable workspaces | ✅ profiles (patch 0004) | `src/main/sessions.ts` |
+| Proxy / Tor route per workspace, third-party cookies off | ✅ 0004 | `src/main/sessions.ts` |
+| Locale and timezone per workspace | ✅ 0005 | `src/main/browser.ts` (`applyEmulation`) |
+| Tracker blocking, per-site allow | ✅ 0007 | `src/main/sessions.ts` |
+| Clear site data | ✅ 0006 | `src/main/sessions.ts` |
+| Saved state and environment files | ✅ 0005 | `src/main/store.ts` |
+| HUD (toasts, prefix-key card, hover URL) | ✅ in the shell document | `src/main/hud.ts` |
+| Prefix key with a page focused | ❓ built (0005), never driven on a screen | `src/main/browser.ts` (`handleKey`), `src/preload/tab.ts` |
+| Zoom per site, interface size | ❓ in the controller, verify | `src/main/browser.ts` |
+| Tab triage: importance, Tidy, sort | ✅ shell + controller (time in front while the window is visible) | `src/main/browser.ts` |
+| Tab triage: sound and typed-text signals | ❌ the engine does not report them | `src/main/browser.ts`, `src/preload/tab.ts` |
+| Save page as text | ❌ needs the reader run in the page and a save dialog (`shell/src/shared/readable.ts` is ready) | `src/main/browser.ts` (`savePage`), `src/preload/tab.ts` |
+| Extensions: load per workspace | ⚠️ loads; **page scripts do not run** (0008) | `src/main/sessions.ts` |
+| Extensions: toolbar popups | ❌ never existed; the reason for the fork | — |
+| Chrome Web Store install by link or id | ❌ (`shell/src/shared/crx.ts` is ready) | `src/main/webstore.ts` |
+| VPN: one WireGuard tunnel per region, fail closed | ❌ (`shell/src/shared/wg.ts` is ready) | `src/main/tunnels.ts`, `test/tunnels.test.ts`, `test/fixtures/fake-wireproxy.mjs` |
+| Link hints (` f), ⌥-click for a private tab | ❌ | `src/preload/tab.ts` |
+| Right-click menu inside a page | ❌ | `src/main/browser.ts` (`pageMenu`) |
+| The window: title bar, traffic lights, fullscreen | ❌ `--app=chrome://weft` only | `src/main/browser.ts` (`createWindow`) |
+| App menu | ❌ | `src/main/menu.ts` |
+| Self-update | ❌ Sparkle planned | `src/main/updater.ts`, `test/updater.test.ts` |
+| Release: drive, sign, notarize, publish, rollback guard | ❌ | `scripts/package-ci.sh`, `scripts/publish.sh`, `scripts/feed.mjs`, `.github/workflows/release.yml` |
+| Headless driver | ✅ `scripts/drive.mjs` (different commands) | `scripts/drive.mjs`, `scripts/smoke.drive` |
+
+Never built on either engine: downloads, find in page, bookmarks, passwords and passkeys,
+printing. Chromium has the machinery for each; Weft's shell has to surface it.
 
 ## Status
 
@@ -143,7 +178,7 @@ popups, same-day security releases, shell chrome that paints over a live page. P
    `app/` (`feat/shared-tracker-list`: `src/shared/trackers.ts` exports
    `TRACKER_HOSTS`).
 2. **After app !3 merges**: delete `shell/trackers.ts` and import `TRACKER_HOSTS` from
-   `../../app/src/shared/trackers` in `shell/controller.ts`; `build-shell.sh` then
+   `../../shell/src/shared/trackers` in `shell/controller.ts`; `build-shell.sh` then
    needs the app checkout at or past that merge.
 3. **Phase 2b — finish.** Done: pages by surface embed, the engine over `chrome.send`, the
    controller, keys from pages (needs a screen to confirm), persistence. Left, in order:
@@ -229,7 +264,7 @@ popups, same-day security releases, shell chrome that paints over a live page. P
 
 ## Open / parked
 
-- The shell bundle is not checked in CI (needs `../app` and Node on the runner); the
+- The shell bundle is not checked in CI (needs `../shell` and Node on the runner); the
   `check` job still covers scripts and patches.
 - Linux compile check once there are patches; Windows VM only on demand
   (root `product.md` § Platform bets).
