@@ -42,6 +42,4 @@ Regenerate all of these whenever the mark changes, from `weft-icon.svg` (≥ 64 
 `weft-icon-small.svg` (16 and 32 px): `qlmanage -t -s 1024`, then `sips -z` per size, then
 `iconutil -c icns`.
 
-- `app/build/icon.icns`, `build/icon.png`: the packaged app.
-- `app/resources/icon.png`: the Dock icon in dev.
-- `chromium/brand/app.icns`, `product_logo_1024.png`: the fork.
+- `chromium/brand/app.icns`, `product_logo_1024.png`: the browser.

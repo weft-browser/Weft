@@ -1,6 +1,7 @@
 # Weft on Chromium
 
-Weft as a Chromium fork: branding, patches and build scripts against a pinned stable Chromium.
+The browser. Weft is a Chromium fork: branding, patches and build scripts against a pinned stable
+Chromium, with the interface bundled from [`../shell`](../shell/).
 The checkout itself is fetched into `chromium/` and never committed. How it is shaped and why:
 [`AGENTS.md`](./AGENTS.md). Where it is going: [`plan.md`](./plan.md).
 

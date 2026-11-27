@@ -59,7 +59,7 @@ cp "$work/out/Assets.car" "$MAC/Assets.car"
 rm -rf "$work"
 
 # ── the shell ───────────────────────────────────────────────────────────────
-# chrome://weft serves the React shell from ../app, bundled into the checkout. The
+# chrome://weft serves the React shell from ../shell, bundled into the checkout. The
 # bundle is build output, not a patch: new-patch.sh leaves it out and this rebuilds it every time.
 "$ROOT/scripts/build-shell.sh"
 

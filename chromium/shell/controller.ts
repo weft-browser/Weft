@@ -1,20 +1,21 @@
-// The controller for the fork: a port of app/src/main/browser.ts that owns the model
+// The controller: it owns the model
 // in the shell process and drives pages through the engine (engine.ts) instead of Electron's
 // WebContentsView and session. The pure half (model, ops, env files, keys) is the app's, imported
 // by path and unchanged. What Electron had and the fork does not yet: sessions per workspace
 // tunnels, extensions, the HUD window, link hints, persistence, timezone emulation; each says so
 // where it is reached, so the shell never claims more than the engine enforces.
-import type { Command, Event, HudState, WeftApi } from '../../app/src/shared/ipc';
-import { MODIFIER_KEYS, leaderAction, type UiAction } from '../../app/src/shared/keys';
+import type { Command, Event, HudState, WeftApi } from '../../shell/src/shared/ipc';
+import { MODIFIER_KEYS, leaderAction, type UiAction } from '../../shell/src/shared/keys';
 import {
   DEFAULT_REGIONS, DISPOSABLE_COLOR, GROUP_COLORS, PALETTE, hostOf, mkEnv, newTab, newWorkspace, nextZoom, normHex, slug, titleFor, toNavigation,
   type BrowserState, type ClosedTab, type Env, type Group, type Tab, type Workspace
-} from '../../app/src/shared/model';
-import { cfgIcon, colorFromFile, envFromFile, parse as parseEnv, serialize } from '../../app/src/shared/envfile';
-import { decodeSnapshot, encodeSnapshot } from '../../app/src/shared/snapshot';
-import * as ops from '../../app/src/shared/ops';
+} from '../../shell/src/shared/model';
+import { cfgIcon, colorFromFile, envFromFile, parse as parseEnv, serialize } from '../../shell/src/shared/envfile';
+import { decodeSnapshot, encodeSnapshot } from '../../shell/src/shared/snapshot';
+import * as ops from '../../shell/src/shared/ops';
+import * as triage from '../../shell/src/shared/triage';
 import { engine, type PageEvent, type PageMode } from './engine';
-import { TRACKER_HOSTS } from './trackers';
+import { TRACKER_HOSTS } from '../../shell/src/shared/trackers';
 
 const NOT_YET = ' is not in the fork yet';
 const TOR = 'socks5://127.0.0.1:9050';
@@ -38,6 +39,8 @@ export class Controller {
   private pages = new Map<string, Page>();
   private zoomMem = new Map<string, number>();
   private envFiles = new Map<string, { file: string; text: string }>();
+  /** The tab in front and since when, while the window is visible (triage time-in-front). */
+  private front: { tabId: string; since: number } | null = null;
   private listeners = new Set<(e: Event) => void>();
   private timers: { emit?: number; close?: number; toast?: number; save?: number } = {};
   private booted!: () => void;
@@ -89,10 +92,13 @@ export class Controller {
       if (t && !t.url) { t.url = nav.url; t.title = nav.title; } else { ws.tabs.push(newTab(nav.url, nav.title)); ws.active = ws.tabs.length - 1; }
     }
     this.booted();
-    engine.setTrackers(TRACKER_HOSTS);
+    engine.setTrackers([...TRACKER_HOSTS]);
     engine.setAllow(Object.keys(this.allow));
     this.ws.forEach((x) => this.sessionFor(x));
     window.addEventListener('pagehide', () => this.flushSave());
+    // Time in front counts while the window is visible. Not yet: window focus, sleep and lock (the
+    // engine does not report them), sound, and typed text; triage.ts caps a stretch at 30 minutes.
+    document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') this.startFront(); else this.endFront(); });
     this.showTab();
     this.emit();
   }
@@ -107,6 +113,7 @@ export class Controller {
   /** state.json and one <slug>.env.toml per workspace under workspaces/, as store.ts + browser.ts do. */
   private flushSave(): void {
     window.clearTimeout(this.timers.save);
+    if (this.front) this.startFront();   // bank the running stretch, keep counting
     engine.writeFile('state.json', JSON.stringify(encodeSnapshot(this.ws, this.activeWs, this.closed, this.allow), null, 2));
     const live = new Set<string>();
     for (const w of this.ws) {
@@ -177,6 +184,25 @@ export class Controller {
 
   // ── helpers ─────────────────────────────────────────────────────────────
 
+  private findTab(id: string): Tab | null {
+    for (const w of this.ws) { const t = w.tabs.find((x) => x.id === id); if (t) return t; }
+    return null;
+  }
+  private endFront(): void {
+    if (!this.front) return;
+    const t = this.findTab(this.front.tabId);
+    if (t) triage.endStretch(t, this.front.since, Date.now());
+    this.front = null;
+  }
+  private startFront(): void {
+    this.endFront();
+    if (document.visibilityState !== 'visible') return;
+    const t = this.ws.length ? this.tabOf(this.cur()) : null;
+    if (!t) return;
+    const now = Date.now();
+    t.lastActive = now;
+    this.front = { tabId: t.id, since: now };
+  }
   private cur(): Workspace { return this.ws[this.activeWs]!; }   // undefined before boot: dispatch() checks
   private tabOf(ws: Workspace, j?: number): Tab | null { return ws.tabs[j ?? ws.active] ?? null; }
   private allowKey(ws: Workspace, host: string): string { return ws.id + '|' + host; }
@@ -244,6 +270,7 @@ export class Controller {
       p.embed.style.pointerEvents = on ? 'auto' : 'none';
     }
     document.title = (tab?.title ? tab.title + ' — ' : '') + ws.name;
+    if (this.front?.tabId !== tab?.id) this.startFront();
   }
 
   private focusPage(): void {
@@ -350,6 +377,9 @@ export class Controller {
       case 'jumpTo': { const t = this.tabOf(ws); if (t && cmd.p >= 0 && cmd.p < t.history.length) engine.page(t.id, 'goToIndex', cmd.p); break; }
       case 'copyLink': this.copyLink(cmd.url); break;
       case 'closeTab': this.closeTab(cmd.j ?? ws.active, cmd.ws); break;
+      case 'closeTabs': this.closeTabs(cmd.ids, cmd.ws ?? this.activeWs); break;
+      case 'sortTabs': this.endFront(); triage.sortByImportance(ws, Date.now()); this.startFront(); this.showTab(); this.emit(); this.toast('Sorted ' + ws.name + ' by importance · pins stay where you put them'); break;
+      case 'savePage': this.toast('Save page as text' + NOT_YET); break;
       case 'reopen': this.reopen(); break;
       case 'togglePin': this.togglePin(cmd.j ?? ws.active); break;
       case 'setTabIcon': { const t = this.tabOf(ws, cmd.j); if (t) { t.icon = cmd.icon; this.emit(); } break; }
@@ -547,6 +577,20 @@ export class Controller {
     this.emit();
     if (o.activate) this.focusPage();
     else this.toast('Opened ' + t.title + ' in ' + (here ? 'a new ' + (o.private ? 'private tab' : 'tab') : ws.name));
+  }
+
+  private closeTabs(ids: string[], wi: number): void {
+    const ws = this.ws[wi];
+    if (!ws) return;
+    let n = 0;
+    for (const id of ids) {
+      if (this.ws[wi] !== ws) break;   // a disposable workspace closed with its last tab
+      const j = ws.tabs.findIndex((t) => t.id === id);
+      if (j < 0) continue;
+      this.closeTab(j, wi);
+      n += 1;
+    }
+    if (n) this.toast('Closed ' + n + (n === 1 ? ' tab' : ' tabs') + ' · ` u reopens');
   }
 
   private closeTab(j: number, wi = this.activeWs): void {

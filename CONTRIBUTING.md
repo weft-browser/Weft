@@ -15,32 +15,34 @@ equally to people and to the coding agents they run.
 
 ## Set up
 
+Most of Weft is TypeScript that runs anywhere, with no browser needed:
+
 ```sh
-git clone https://github.com/weft-browser/weft.git
-cd weft/app
+git clone https://github.com/weft-browser/Weft.git
+cd Weft/shell
 npm install
-npm run dev      # the browser, with hot reload for the shell
+npm run check    # TypeScript: the model, the shell, the fork's controller
+npm test         # vitest
+npm run build    # the bundle the fork packs
 ```
 
-Requirements: macOS 14+ on Apple silicon to run the app, Node 24. Type-checking, tests and the
-bundles also run on Linux. The Chromium fork in `chromium/` needs ~100 GB and hours; you do not
-need it to work on the app.
+Node 24. This covers the interface, the model, the file formats, the keymap and tab triage.
+
+The browser itself is a Chromium fork. Building it needs macOS on Apple silicon, about 100 GB
+free and a few hours the first time: [`chromium/README.md`](./chromium/README.md). You do not
+need it for a change that lives in `shell/`.
 
 ## Make the change
 
-```sh
-npm run check    # TypeScript, both configs
-npm test         # vitest
-npm run build && node scripts/drive.mjs scripts/smoke.drive   # drive the built app, no screen needed
-```
-
-- New behaviour goes in `app/src/shared/` first, as pure functions with tests, and is then wired
-  to the engine in `app/src/main/`. `app/AGENTS.md` explains why.
+- New behaviour goes in `shell/src/shared/` first, as pure functions with tests, and is then wired
+  to the engine in `chromium/shell/controller.ts` (and a patch under `chromium/patches/` when the
+  engine has to do something new). `shell/AGENTS.md` and `chromium/AGENTS.md` explain why.
 - Follow [`rules/engineering.md`](./rules/engineering.md): a regression test with every fix, a
   fixture when a stored format changes, keyboard access for every surface, no new network request
   without the data inventory.
-- Drive the feature in the built app before you call it done, and say in the pull request what
-  you drove.
+- **Drive it if you can.** With a Chromium build, `chromium/scripts/drive.mjs` opens the shell
+  headless and screenshots it. Without one, say in the pull request that the change is
+  type-checked and unit-tested but not driven; a maintainer will drive it before merging.
 
 ## Send it
 

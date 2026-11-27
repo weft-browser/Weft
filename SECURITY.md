@@ -17,13 +17,14 @@ the update feed), and the macOS version. You will get an acknowledgement within 
 - A workspace's traffic leaving by a route other than the one its environment names (for example
   a VPN workspace connecting directly).
 - The update path: the feed, the signature checks, the release pipeline.
-- Weft's own code and configuration. Bugs in Chromium or Electron themselves belong upstream;
+- Weft's own code and configuration. Bugs in Chromium itself belong upstream;
   tell us too if Weft is slow to pick up the fix.
 
 ## Supported versions
 
-Only the latest release. Weft updates itself, and a release follows upstream Chromium/Electron
-security releases.
+Only the latest release. Weft is moving to its own Chromium fork and has no release of it yet;
+the Electron build 0.1.2 is no longer maintained. Once the fork ships, a release follows every
+upstream Chromium security release.
 
 ## What Weft does not promise
 

@@ -63,12 +63,12 @@ spike='chrome://weft/?page=data:text/html,%3Cbody%20style%3D%22margin%3A0%3Bback
 if "$BIN" "${common[@]}" --dump-dom "$spike" > "$OUT/weft-page.html" 2> "$OUT/weft-page.log" \
    && grep -q 'x-chromium-surface-embed' "$OUT/weft-page.html"; then
   echo "ok    chrome://weft?page= embeds a page (surface embed)"
-  if [[ -d "$ROOT/../app/node_modules/playwright-core" ]] && command -v node >/dev/null; then
+  if [[ -d "$ROOT/../shell/node_modules/playwright-core" ]] && command -v node >/dev/null; then
     node "$ROOT/scripts/drive.mjs" "$PROFILE" "$spike" --wait 3000 --out "$OUT/weft-page.png" >/dev/null 2>&1 \
       && echo "      screenshot: $OUT/weft-page.png (the page area should be orange)" \
       || { echo "FAIL  drive.mjs could not screenshot the embedded page"; fail=1; }
   else
-    echo "note  no playwright-core in ../app; skipped the embed screenshot"
+    echo "note  no playwright-core in ../shell; skipped the embed screenshot"
   fi
 else
   echo "FAIL  chrome://weft?page= did not embed a page"; fail=1
