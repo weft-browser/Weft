@@ -38,3 +38,8 @@ Want to help? [`CONTRIBUTING.md`](./CONTRIBUTING.md). Found a security problem?
   view that sends commands.
 
 Full details and invariants: [`AGENTS.md`](./AGENTS.md).
+
+## Licence
+
+[Mozilla Public License 2.0](./LICENSE). © Walnut Labs LLC. The name *Weft* and the Woven W mark
+belong to Walnut Labs LLC and are not covered by the licence.

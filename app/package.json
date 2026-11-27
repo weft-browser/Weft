@@ -2,6 +2,7 @@
   "name": "weft",
   "version": "0.1.2",
   "private": true,
+  "license": "MPL-2.0",
   "description": "Weft: a keyboard-first browser organised as workspaces \u00d7 tabs, each workspace its own environment.",
   "main": "./out/main/index.js",
   "scripts": {
