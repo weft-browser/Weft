@@ -14,6 +14,7 @@ fits the fork: [README.md](README.md).
   browser model arrives as `state` events and changes only through commands.
 - `../chromium/shell/controller.ts` — owns the model at runtime and calls the engine. A command
   the engine cannot serve yet answers with a toast saying so, never silence.
+- `dev/` — the dev mode: a fake engine, its entry, and a headless smoke script.
 - `test/` — vitest. `fixtures/` holds one file per historical on-disk shape; never delete one.
 
 ## Build & test
@@ -25,10 +26,19 @@ npm test           # vitest
 npm run build      # the bundle the fork packs, written to out/shell/
 ```
 
-CI runs exactly these. **Driving** a change means a Chromium build
-([`../chromium/AGENTS.md`](../chromium/AGENTS.md)): `scripts/drive.mjs` there opens
-`chrome://weft` headless and screenshots it. If you cannot build Chromium, say in the pull request
-that the change is type-checked and unit-tested but not driven; a maintainer drives it.
+CI runs these, then drives the shell on the fake engine.
+
+**Driving a change** has two levels, and a pull request says which it reached:
+
+1. **On the fake engine** (anyone, seconds): `npm run dev`, then use it, or
+   `npm run dev:smoke -- http://localhost:5173/ <shots-dir>` for headless Chrome with screenshots.
+   This proves the interface and the controller. It proves nothing about pages, routes, blocking
+   or extensions: `dev/fake-engine.ts` only keeps a URL and a history per page.
+2. **On a Chromium build** ([`../chromium/AGENTS.md`](../chromium/AGENTS.md)): `scripts/drive.mjs`
+   there opens `chrome://weft` headless. Needed for anything the engine does.
+
+When the engine protocol (`../chromium/shell/engine.ts`) gains a message, teach the fake engine
+the same message in the same pull request, or the dev mode silently drifts.
 
 ## Rules of the road
 

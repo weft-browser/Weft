@@ -21,6 +21,7 @@ Most of Weft is TypeScript that runs anywhere, with no browser needed:
 git clone https://github.com/weft-browser/Weft.git
 cd Weft/shell
 npm install
+npm run dev      # the interface in your browser, on a fake engine
 npm run check    # TypeScript: the model, the shell, the fork's controller
 npm test         # vitest
 npm run build    # the bundle the fork packs
@@ -40,9 +41,9 @@ need it for a change that lives in `shell/`.
 - Follow [`rules/engineering.md`](./rules/engineering.md): a regression test with every fix, a
   fixture when a stored format changes, keyboard access for every surface, no new network request
   without the data inventory.
-- **Drive it if you can.** With a Chromium build, `chromium/scripts/drive.mjs` opens the shell
-  headless and screenshots it. Without one, say in the pull request that the change is
-  type-checked and unit-tested but not driven; a maintainer will drive it before merging.
+- **Drive it.** `npm run dev` shows the interface on a fake engine in seconds; use the change
+  there. Anything the engine does (pages, routes, blocking, extensions) needs a Chromium build
+  and `chromium/scripts/drive.mjs`. Say in the pull request which of the two you did.
 
 ## Send it
 

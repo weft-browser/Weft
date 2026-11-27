@@ -36,6 +36,12 @@ jobs:
       - run: npm test
       # The chrome://weft bundle, built exactly as the fork packs it.
       - run: npm run build
+      # The shell and the controller driven in headless Chrome on the fake engine.
+      - name: Drive the shell (fake engine)
+        run: |
+          npx vite --config dev/vite.config.mjs --port 5199 --strictPort > vite.log 2>&1 &
+          for i in $(seq 1 30); do curl -sf http://localhost:5199/ >/dev/null && break; sleep 1; done
+          node dev/smoke.mjs http://localhost:5199/
 
   chromium:
     name: chromium (scripts, patches)
